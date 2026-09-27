@@ -21,11 +21,14 @@ Projects define discovery inputs in `PROJECT.md` under `## Discovery inputs`: se
 
 | Method (coverage key) | Procedure | Fully checked for a period P when |
 |---|---|---|
-| Repository search (`github.com/search`) | For each query, two passes sorted by stars: **new** `<query> created:P`, and **established** `<query> pushed:P stars:>=<threshold>`. Read each pass to the search depth. | Every required query and pass ran for P, and every result page within the configured depth (or to the total, if smaller) was retrieved completely, with the required fields, and screened. A total above the depth completes the procedure but is a bounded search: the report records the total, the depth examined and that results beyond the depth were not examined. Any failed, incomplete, summarized or truncated retrieval leaves P unchecked. |
+| New repositories (`github.com/search-new`) | For each query, `<query> created:P`, sorted by stars, read to the search depth. | Every query ran for P, and every result page within the configured depth (or to the total, if smaller) was retrieved completely, with the required fields, and screened. A total above the depth completes the procedure but is a bounded search: the report records the total, the depth examined and that results beyond the depth were not examined. Any failed, incomplete, summarized or truncated retrieval leaves P unchecked. |
+| Established repositories (`github.com/search-established`) | For each query, `<query> pushed:>=<P start> stars:>=<threshold>`, sorted by stars, read to the search depth. | As for new repositories, for every query. |
 | Curated lists (`github.com/lists`) | For each configured list repository, read the changes to its list files over P from Git history. | Every configured list's changes over P were read and every added repository link screened. |
 | Web search (`web-search`) | Run each web query with results restricted to effective Allowed domains; screen the top results to the web depth. | Search engines do not bound dates reliably, so this method is checked only for the run date: every query ran and its top results were screened. Coverage advances to the run date and the report labels the method recency-based. |
 
-The baseline window is worked in calendar-month sub-periods, oldest first, so coverage advances contiguously and an interrupted baseline resumes at the next unchecked month. An incremental run treats its whole search period as one sub-period. Coverage means the configured procedure was completed for the period; it never means every matching repository on the host was found. Star-sorted passes prioritize discovery; they do not monitor recorded repositories for changes.
+The baseline window is worked in calendar-month sub-periods, oldest first, for new repositories and curated lists, so coverage advances contiguously and an interrupted baseline resumes at the next unchecked month. Established-repository discovery runs once across the whole baseline window (P = the fixed window), and its coverage is tracked separately; the baseline is complete only when all three methods reach the window end. An incremental run treats its whole search period as one sub-period for every method, so established discovery recurs in every run for the period since its coverage.
+
+GitHub's `pushed:` qualifier matches a repository's latest push date. `pushed:>=<P start>` therefore finds repositories with any push on or after P's start, that is, repositories active since then. It cannot reconstruct activity within an individual past month, so established discovery is never run per historical month. Coverage means the configured procedure was completed for the period; it never means every matching repository on the host was found. Star-sorted passes prioritize discovery; they do not monitor recorded repositories for changes. Established discovery is bounded and star-sorted: it reads only the highest-starred active repositories to the search depth. In daily runs these are mostly already recorded, so relevant repositories ranked beyond the depth are not examined; the report's count of established results not already recorded shows how much new discovery each run actually yields.
 
 ## Screening
 Using search and list metadata only, before verification:
@@ -62,7 +65,7 @@ Item fields: `name` (current `owner/repo`), `repo_id`, `created`, `latest_releas
 ## Report additions
 Per finding: repository link; type; one-line purpose; created date; latest release or tag with date; license; activity (last commit month, release cadence if evident); documented requirements and self-hosting notes; security caveats found; evidence tier; relevance label and reason. Material changes show old → new values with evidence.
 
-Coverage, per method and sub-period: queries run, results available and read, and for bounded searches the total, the depth examined and the limitation, candidates screened, verified, duplicates, failures and the access path used.
+Coverage, per method and sub-period: queries run, results available and read, for established discovery how many results read were not already recorded, and for bounded searches the total, the depth examined and the limitation, candidates screened, verified, duplicates, failures and the access path used.
 
 Weekly synthesis: a deduplicated shortlist of the period's high-relevance findings and material changes; candidate experiments only if the project requests them.
 
@@ -75,5 +78,5 @@ Weekly synthesis: a deduplicated shortlist of the period's high-relevance findin
 - Weekly synthesis day: Friday.
 
 ## Departures from contract defaults
-- Coverage entries are keyed by discovery method (`github.com/search`, `github.com/lists`, `web-search`) even though the Allowed list is restricted, because one source hosts several independent methods. Each entry follows the contract's coverage rule.
+- Coverage entries are keyed by discovery method (`github.com/search-new`, `github.com/search-established`, `github.com/lists`, `web-search`) even though the Allowed list is restricted, because one source hosts several independent methods. Each entry follows the contract's coverage rule.
 - Verification links are permitted (`framework/SOURCES.md`).

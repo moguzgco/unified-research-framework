@@ -17,11 +17,13 @@ Pace search requests to the path's rate limit and count each request, including 
 If no path returns structured dates, verification is incomplete: report affected candidates as unverified leads. Tools that summarize pages can misstate dates and versions; take them only from raw API fields or Git output.
 
 ## Repository search
-- Date qualifiers use whole days: `created:YYYY-MM-DD..YYYY-MM-DD`, `pushed:YYYY-MM-DD..YYYY-MM-DD`.
-- Use compact results for discovery. Required fields per item: `full_name`, `id`, `created_at`, `fork` and `archived`. `pushed_at` is not required in discovery results: the established pass's `pushed:P` qualifier already bounds activity, and `pushed_at` is retrieved at verification.
+- Date qualifiers use whole days. New repositories: `created:YYYY-MM-DD..YYYY-MM-DD`. Established repositories: `pushed:>=YYYY-MM-DD` with `stars:>=<threshold>`.
+- `pushed:` filters on a repository's latest push date, not on pushes within a range: `pushed:2026-04-01..2026-04-30` returns only repositories whose last push fell in April. Never use a closed `pushed:` range for discovery.
+- Use compact results for discovery. Required fields per item: `full_name`, `id`, `created_at`, `fork` and `archived`. `pushed_at` is not required in discovery results: the `pushed:>=` qualifier already bounds activity, and `pushed_at` is retrieved at verification.
 - A result list is complete when `incomplete_results` is false, every page within the depth was read, the number of items read equals `min(depth, total_count)`, and every item has the required fields. Otherwise the pass failed for that period.
 - If the tool used summarizes, truncates or omits results or fields, the pass failed: mark the period unchecked, report the limitation and the tool, and do not infer missing results or values. Request smaller pages if that yields complete results.
 - Record `total_count` and items read for each pass; a total above the depth is reported as a bounded search.
+- Established results that are already recorded (in `items` or `historical_ids`) are counted as repeated observations and are not re-verified unless due; report how many results read were not already recorded.
 
 ## Curated lists
 - List changes over P: in the metadata clone, `git log --since=<P start> --until=<P end> -p -- <list files>`, reading only added lines.
