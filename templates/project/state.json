@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "last_run": { "date": null, "type": null, "status": null, "report": null },
+  "baseline": { "status": "not_started", "window": null, "progress": null },
+  "sources": {},
+  "items": {},
+  "historical_ids": [],
+  "pending_leads": []
+}
