@@ -17,16 +17,20 @@ Required before enabling a schedule for a new framework or project, and after pr
 **V1 Baseline**
 - [ ] Limited window produces representative historical findings.
 - [ ] Each finding is verified and linked to its original source.
-- [ ] `state.json` records stable IDs and baseline progress; report and state are pushed.
+- [ ] `state.json` records stable IDs, the fixed baseline window and per-source coverage; an interrupted baseline resumes from that coverage.
+- [ ] Report and state are pushed.
 
 **V2 Overlapping incremental**
 - [ ] A run overlapping V1's coverage reports no previously recorded item as new.
 - [ ] IDs are stable; repeated observations are classified as such.
-- [ ] Checkpoints advance only over verified coverage.
+- [ ] Older items seen for the first time are classified as first observations, not new.
+- [ ] Coverage advances only over verified periods.
 
-**V3 Material change and partial failure** (throwaway branch)
+**V3 Material change, reappearance and partial failure** (throwaway branch)
 - [ ] Altering the recorded change indicators of one or two items produces material-change findings with evidence; unchanged items are not flagged.
-- [ ] Making one source unavailable (for example, a temporary exclusion) yields status `partial`, discloses the gap and leaves that source's checkpoint unchanged.
+- [ ] Re-adding a `historical_ids` entry's item to discovery compares it with the stored record; it is reactivated only on verified evidence.
+- [ ] Making one source unreachable (for example, an Allowed test source at an unreachable address) yields status `partial`, discloses the gap and leaves that source's coverage unchanged.
+- [ ] The next run searches the uncovered period before advancing that source's coverage.
 
 **V4 Reporting and persistence**
 - [ ] Report follows the contract skeleton; dates are genuine; `state.json` parses.
@@ -36,7 +40,7 @@ Required before enabling a schedule for a new framework or project, and after pr
 **V5 Source overrides**
 - [ ] A project exclusion of a framework source prevents discovery and verification from it.
 - [ ] A project addition is used alongside framework sources (`Mode: add`).
-- [ ] `Mode: only` restricts discovery to the project list.
+- [ ] `Mode: only` restricts discovery to the project list; an empty `Mode: only` list is reported as a configuration error and the framework list is used unchanged.
 - [ ] The verification-links setting is respected.
 
 **V6 Periodic synthesis dry run**

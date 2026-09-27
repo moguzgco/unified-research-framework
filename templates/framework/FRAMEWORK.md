@@ -9,7 +9,7 @@ Specializes `RESEARCH-CONTRACT.md` for <type of information>. Record only domain
 <!-- Stable ID format. How duplicates, reposts, forks, mirrors or syndicated copies map to one item. -->
 
 ## Discovery
-<!-- How candidates are found. Source-specific procedures go in framework/sources/<source>.md. -->
+<!-- How candidates are found. Source-specific procedures go in framework/sources/<source>.md. If discovery is unrestricted, name the discovery methods used as coverage keys. -->
 
 ## Screening
 <!-- Quick checks that discard irrelevant or already-recorded candidates before verification. -->
@@ -20,11 +20,14 @@ Specializes `RESEARCH-CONTRACT.md` for <type of information>. Record only domain
 ## Change indicators and material changes
 <!-- Fields stored as `fingerprint` in state.json; which differences are material and which are ignored. -->
 
+## Inactive items
+<!-- When an item is inactive and moves to historical_ids, and what verified evidence confirms it; when a reappearing item counts as active again. -->
+
 ## Re-verification interval
 <!-- When recorded active items are rechecked without new evidence. -->
 
 ## Additional state fields
-<!-- Item fields beyond the contract's core fields. Per-source checkpoints: used / not used. -->
+<!-- Item fields beyond the contract's core fields. Source-native checkpoints (cursor or last ID): used / not used. -->
 
 ## Report additions
 <!-- Extra sections or item fields for daily and periodic reports. -->

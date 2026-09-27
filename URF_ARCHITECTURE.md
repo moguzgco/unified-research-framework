@@ -131,7 +131,7 @@ Each private project maintains:
 
 Reports preserve research history and original source references.
 
-State is a compact index for deduplication, previous observations and execution progress: active items, compact historical identifiers, pending leads, baseline progress and optional per-source checkpoints when useful for that research type. Detailed evidence and history belong in dated reports and Git. State is not a database or duplicate report archive.
+State is a compact index for deduplication, previous observations and execution progress: active items, compact historical records, pending leads, the fixed baseline window, per-source coverage dates and optional source-native checkpoints when useful for that research type. Detailed evidence and history belong in dated reports and Git. State is not a database or duplicate report archive.
 
 Do not introduce additional persistent storage systems.
 
@@ -345,7 +345,7 @@ URF defines *how* source configuration is interpreted but contains no external r
 - A project may narrow discovery with `Mode: only` in its `Allowed` section: its Allowed list then replaces the framework Allowed list instead of extending it. The default, `Mode: add`, extends the framework list.
 - Distinguish discovery sources from original-source verification links. A framework or project may explicitly permit following verification links outside the discovery Allowed list; explicit effective exclusions still apply.
 - Changing project sources should not erase historical reports. Newly enabled sources may require a source-specific historical baseline; disabled sources cease discovery without losing recorded history.
-- Frameworks may use per-source checkpoints in existing `state.json` if partial-source failures would otherwise cause missed discovery windows. Do not require them for every framework.
+- Every project records a compact per-source coverage date in `state.json`, advanced only over verified coverage, so partial runs never create missed discovery windows. Source-native checkpoints (cursors, last IDs) are optional and framework-specific.
 
 The same lower-layer precedence applies to configurable research procedures, budgets and reporting preferences. Preserve explicit overrides even when their current value happens to match the parent. Any conflict discovered during propagation is presented for approval rather than silently resolved. Fundamental evidence integrity and truthful reporting are common research contracts, not defaults to be silently discarded.
 
