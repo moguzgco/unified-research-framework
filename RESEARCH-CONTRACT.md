@@ -45,7 +45,7 @@ Each effective source has an entry in `state.json` `sources` (section 7). When d
 - **Incremental** — baseline complete. Search each source from its `covered_through` to the execution date, so periods left uncovered by partial or failed runs are revisited before coverage advances. Frameworks may define a small overlap. Re-verify recorded items when new evidence appears or their verification interval is due.
 - **Source baseline** — a source newly in the effective Allowed list gets an entry with `from` set to the execution date minus the baseline window, and is worked the same way within the run budget.
 
-**Coverage rule.** At the end of a run, advance a source's `covered_through` only to the end of the contiguous period, starting at its current coverage, that this run fully checked and verified. A failed source or a failed run advances nothing.
+**Coverage rule.** At the end of a run, advance a source's `covered_through` only to the end of the contiguous period, starting at its current coverage, that this run fully checked and verified. A failed source or a failed run advances nothing. A period counts as fully checked only when every operation it requires has completed, in this run or through a valid checkpoint (section 7); a checkpoint itself never advances coverage.
 
 ## 5. Effective sources
 
@@ -94,11 +94,13 @@ A compact index, not an archive. Evidence and narrative belong in reports and Gi
 
 - `items` — active items keyed by the framework's stable ID: `first_seen`, `last_seen`, `last_verified`, `status`, `fingerprint` (the framework's change indicators), `report` (path of the report that last described the item), plus framework-defined fields.
 - `baseline.window` — absolute `from` and `to` dates, fixed at the first baseline run.
-- `sources` — one entry per effective source or discovery method: `from`, `covered_through`, `last_status`, and optionally a framework-defined source-native `checkpoint` (cursor or last ID) that follows the same coverage rule. Entries of disabled sources are kept.
+- `sources` — one entry per effective source or discovery method: `from`, `covered_through`, `last_status`, and optionally `checkpoint`. Entries of disabled sources are kept.
+  - `last_status` — result of the most recent run that worked the source: `complete` (every required operation for the periods worked completed), `partial` (some completed; others incomplete or unattempted) or `failed` (none completed). A source not worked in a run keeps its value.
+  - `checkpoint` — optional, defined by the framework: compact progress within the first period not yet covered (for example completed operations, a cursor or a last ID). It never advances `covered_through`. A later run reuses it only under the framework's validity conditions and otherwise repeats the work. Remove it when that period becomes covered or the checkpoint is invalid.
 - `historical_ids` — inactive items keyed by ID, each with only `inactive_since`, `fingerprint` and `report`. Never removed.
 - **Inactive items.** An item moves from `items` to `historical_ids` when the framework's inactivity criterion is verified; if the framework defines none, items stay active. Report the move under State changes.
 - **Reappearance.** When a candidate's ID is in `historical_ids`, verify it and compare its evidence and fingerprint with the stored record, and with its report if needed. Classify it by the framework's criteria as a repeated observation or a material change. Move it back to `items` only when verified evidence shows it active again by the framework's criteria.
-- `pending_leads` — unverified candidates to retry, each with the date first seen. Keep short; drop a lead only with a reason stated in the report.
+- `pending_leads` — unverified candidates to retry, each with the date first seen. A lead may come from a period that is not yet covered (a partial run), provided that period lies within the baseline window or the run's search period. Match candidates to existing leads by stable identifier first, then by name; when an identifier becomes available for a name-only lead, add it to that lead and keep its first-seen date and origin. Keep short; drop a lead only with a reason stated in the report.
 
 ## 8. Reports
 
@@ -137,9 +139,10 @@ Each item lists its ID, title, source link(s), relevant dates, a short evidence 
 ## 9. Failures and validation
 
 - **Source failure** — record it under Coverage, do not advance that source's coverage, continue with other sources. Status: partial.
+- **Operation failure** — within a source, continue independent operations after one fails while the budget permits. Report each operation as complete, incomplete (attempted but not fully retrieved) or unattempted (not run, with the reason). Only complete operations count toward coverage or a checkpoint. Candidates from an incomplete operation may be kept as unverified leads; the operation stays incomplete.
 - **Budget exhausted** — stop discovery, record what remains uncovered. Status: partial.
 - **Fatal error** — write a failed report with the reason; leave `state.json` unchanged except `last_run`; commit and push the report if possible.
-- **Before committing** — `state.json` parses and has the core fields; coverage advanced only by the coverage rule; every new or changed item in state appears in the report; every finding has a link; the report date is the execution date.
+- **Before committing** — `state.json` parses and has the core fields; coverage advanced only by the coverage rule; no checkpoint lists an operation that did not complete; every new or changed item in state appears in the report; every finding has a link; the report date is the execution date.
 - **Push failure** — report it in the run output and send no email.
 
 ## 10. Persistence and email
