@@ -30,7 +30,7 @@ The baseline window is worked in calendar-month sub-periods, oldest first, so co
 ## Screening
 Using search and list metadata only, before verification:
 - Map forks, mirrors and renamed repositories to their IDs.
-- Skip recorded items whose visible indicators (pushed date, archived flag, default branch) show no possible material change and whose re-verification is not due; count them as repeated observations.
+- Skip recorded items whose visible indicators (archived flag, default branch) show no possible material change and whose re-verification is not due; count them as repeated observations. Full metadata, including `pushed_at`, is retrieved only when verifying.
 - Drop placeholders and candidates clearly outside the project's scope.
 - Rank the rest by likely relevance; candidates beyond the verification budget become pending leads, retried first in the next run.
 
