@@ -269,7 +269,7 @@ The general execution procedure is:
 
 The specialized framework determines the exact identity rules, evidence requirements and meaningful-change criteria for its target type.
 
-Every execution produces a daily report, including partial and failed runs.
+Every research execution produces a daily report, including partial and failed runs. A run rejected before execution because its contract selection is invalid produces no report; the error appears only in the run output.
 
 Failed runs preserve the last successful research state.
 
@@ -283,6 +283,20 @@ Use genuine execution dates. Never fabricate dated research reports.
 
 
 ## 5. Separation of responsibilities
+
+RESEARCH CONTRACTS
+
+```
+Common Research Contract            (RESEARCH-CONTRACT.md)
+         ↑
+Continuous Research Agent Contract  (CONTINUOUS-AGENT-CONTRACT.md)
+```
+
+The common Research Contract defines what research means in URF and the rules all URF research shares. It is never selected or run on its own.
+
+An execution contract defines how a concrete research agent runs and follows the common contract. Each concrete agent selects exactly one execution contract in its invocation (`Contract: continuous`); a missing or unsupported selection is a configuration error. The only execution contract is currently the Continuous Research Agent Contract: incremental, coverage-based research with persistent state, run on a schedule or manually.
+
+Execution contracts are not an additional hierarchy level: specialized frameworks and private projects configure research under whichever contract an agent selects.
 
 UNIFIED BLUEPRINT
 
@@ -380,7 +394,7 @@ The first Claude implementation session should read this document and any availa
 **Stage 1 — Review and plan (no file or Git changes):**
 
 1. Identify only material gaps, contradictions and unnecessary complexity.
-2. Propose the minimum URF file layout and responsibilities, avoiding duplicated instructions. The adopted layout is `README.md`, `URF_ARCHITECTURE.md` (this design reference), `RESEARCH-CONTRACT.md`, `PROPAGATION.md`, `VALIDATION.md` and minimal specialized-framework/private-project templates.
+2. Propose the minimum URF file layout and responsibilities, avoiding duplicated instructions. The adopted layout is `README.md`, `URF_ARCHITECTURE.md` (this design reference), `RESEARCH-CONTRACT.md` (common contract), `CONTINUOUS-AGENT-CONTRACT.md` (Continuous execution contract), `PROPAGATION.md`, `VALIDATION.md` and minimal specialized-framework/private-project templates.
 3. Explain how a framework branch and a separate private project repository are initialized and how the manual Propagation Agent operates.
 4. Present a short implementation plan and stop for explicit approval.
 

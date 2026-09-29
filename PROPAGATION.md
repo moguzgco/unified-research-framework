@@ -7,7 +7,7 @@ The maintainer states: the flow (A or B), the approved parent revision, and the 
 ## Rules
 
 - Do not modify `PROJECT.md`, `SOURCES.md`, `state.json` or `reports/` unless the maintainer approves that specific change.
-- Never resolve a conflict silently. Recommend keeping the lower-layer rule, unless it would break an invariant in `RESEARCH-CONTRACT.md` section 3; then say so and recommend conforming.
+- Never resolve a conflict silently. Recommend keeping the lower-layer rule, unless it would break an invariant in `RESEARCH-CONTRACT.md` section 3 or in an execution contract (`*-AGENT-CONTRACT.md`); then say so and recommend conforming.
 - Do not rewrite historical reports or rerun baselines.
 - Do not commit or push before the final approval (checkpoint 2).
 
@@ -28,8 +28,8 @@ Checkpoint 0 is the maintainer's approval of the parent change itself, before in
 
 ## Flow B — framework branch → private project
 
-1. Read `framework/SYNC.md` in the project for the last synchronized commit. In the URF repository, diff that commit against the approved framework commit for the runtime files: `RESEARCH-CONTRACT.md` and `framework/`.
-2. File mapping: URF `RESEARCH-CONTRACT.md` → project `framework/RESEARCH-CONTRACT.md`; URF `framework/<path>` → project `framework/<path>`. Nothing else is copied.
+1. Read `framework/SYNC.md` in the project for the last synchronized commit. In the URF repository, diff that commit against the approved framework commit for the runtime files: `RESEARCH-CONTRACT.md`, the execution contracts (`*-AGENT-CONTRACT.md`) and `framework/`.
+2. File mapping: URF `RESEARCH-CONTRACT.md` and `*-AGENT-CONTRACT.md` → project `framework/` under the same names; URF `framework/<path>` → project `framework/<path>`. Nothing else is copied.
 3. Compare the changes with the project's `PROJECT.md` and `SOURCES.md`. List:
    - conflicts with explicit project overrides (recommend keeping the project override);
    - effective sources before and after;

@@ -1,6 +1,6 @@
 # <Framework name> Framework
 
-Specializes `RESEARCH-CONTRACT.md` for <type of information>. Record only domain-specific rules; do not restate the contract. Nothing here may weaken the contract's invariants (section 3).
+Specializes `RESEARCH-CONTRACT.md` and the execution contracts for <type of information>. Record only domain-specific rules; do not restate the contracts. Nothing here may weaken their invariants.
 
 ## Target
 <!-- What an item is, and what is in and out of scope for this framework. -->
