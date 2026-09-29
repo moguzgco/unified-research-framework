@@ -32,20 +32,20 @@ No framework or project setting may disable or weaken these.
 - **I1 Evidence.** Every reported finding links to at least one source the agent actually accessed. Verify against original sources as the framework requires. Anything not verified is reported as an unverified lead, not a finding.
 - **I2 Truthful reporting.** Report actual coverage, failures and partial runs. Never pad findings or claim checks that were not performed.
 - **I3 Genuine dates.** Reports and state use the actual execution date. Never backdate or fabricate a dated report.
-- **I4 Coverage.** Never advance a source's coverage beyond verified coverage.
+- **I4 Coverage.** Never advance a source's coverage beyond the period that is fully checked (section 4).
 - **I5 Continuity.** Never delete historical reports or compact historical identifiers. A failed run leaves the last successful state intact.
 - **I6 Persist before notifying.** Send email only after the report and state have been committed and pushed successfully.
 - **I7 Source scope.** Never use an effective excluded source for discovery or verification.
 
 ## 4. Run type and coverage
 
-Each effective source has an entry in `state.json` `sources` (section 7). When discovery is unrestricted, entries are keyed by the discovery methods named in `FRAMEWORK.md` (for example `web-search`). An entry's `covered_through` is the end of the contiguous period, starting at its `from` date, that has been fully checked and verified.
+Each effective source has an entry in `state.json` `sources` (section 7). When discovery is unrestricted, entries are keyed by the discovery methods named in `FRAMEWORK.md` (for example `web-search`). An entry's `covered_through` is the end of the contiguous period, starting at its `from` date, that has been fully checked: every discovery operation the framework requires for that period completed successfully, in this run or through a valid checkpoint, and every result was screened. Relevant candidates not yet verified remain in `pending_leads`; verifying them is not required for coverage.
 
 - **Baseline** — `baseline.status` is `not_started` or `in_progress`. At the first baseline run, fix `baseline.window` as absolute dates: `to` is the execution date and `from` is `to` minus the configured baseline window; every source entry starts at that `from`. Work each source from its coverage toward `window.to` within the budget, prioritizing relevant and significant historical items over exhaustive collection. Set `baseline.status` to `complete` when every source effective at baseline start has `covered_through` on or after `window.to`. An unfinished baseline continues in the next run.
 - **Incremental** — baseline complete. Search each source from its `covered_through` to the execution date, so periods left uncovered by partial or failed runs are revisited before coverage advances. Frameworks may define a small overlap. Re-verify recorded items when new evidence appears or their verification interval is due.
 - **Source baseline** — a source newly in the effective Allowed list gets an entry with `from` set to the execution date minus the baseline window, and is worked the same way within the run budget.
 
-**Coverage rule.** At the end of a run, advance a source's `covered_through` only to the end of the contiguous period, starting at its current coverage, that this run fully checked and verified. A failed source or a failed run advances nothing. A period counts as fully checked only when every operation it requires has completed, in this run or through a valid checkpoint (section 7); a checkpoint itself never advances coverage.
+**Coverage rule.** At the end of a run, advance a source's `covered_through` only to the end of the contiguous period, starting at its current coverage, that this run fully checked. A failed source or a failed run advances nothing. A period counts as fully checked only when every operation it requires has completed, in this run or through a valid checkpoint (section 7); a checkpoint itself never advances coverage.
 
 ## 5. Effective sources
 
