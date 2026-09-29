@@ -51,9 +51,18 @@ GitHub's `pushed:` qualifier matches a repository's latest push date. `pushed:>=
 Using search and list metadata only, before verification:
 - Map forks, mirrors and renamed repositories to their IDs.
 - Match candidates to pending leads by `repo_id`, then by name (case-insensitive). Add a missing `repo_id` to a name-only lead, and update `name` when a lead's `repo_id` appears under a new name; keep the lead's `first_seen`, method and period.
+- Skip candidates in `rejected_ids` and count them as previously rejected. A candidate matches an entry by `repo_id` when both are known, otherwise by ID (see Item identity).
 - Skip recorded items whose visible indicators (archived flag, default branch) show no possible material change and whose re-verification is not due; count them as repeated observations. Full metadata, including `pushed_at`, is retrieved only when verifying.
 - Drop placeholders and candidates clearly outside the project's scope.
-- Rank the rest by likely relevance; candidates beyond the verification budget become pending leads, retried first in the next run.
+- Add the rest to `pending_leads`; verification follows *Pending leads* below.
+
+## Pending leads
+Verify pending leads in this order: category (project Scope order), then oldest `first_seen`, then repository name compared case-insensitively. Reserve the first quarter of the run's verification budget, rounded up, for the oldest leads regardless of category (oldest `first_seen`, then category, then name); the rest follows the normal order.
+
+Outcomes:
+- **High or medium relevance:** remove from `pending_leads` and add to `items`.
+- **Low relevance, or confirmed out of scope:** remove from `pending_leads` and add to `rejected_ids`; the report states the reason.
+- **Temporary failure** (a request failed, timed out, was rate-limited or returned incomplete data): the attempt counts against the verification budget; the lead stays pending and is not attempted again in this run.
 
 ## Verification
 - The original source is the repository itself. Verify existence, canonical name, `repo_id`, purpose (description and README), license, archived status, creation date, latest release and latest tag.
@@ -79,6 +88,12 @@ Active items: every 30 days, whether or not they appear in current search result
 
 ## Additional state fields
 Item fields: `name` (current `owner/repo`), `repo_id`, `created`, `latest_release`, `license`, `relevance`, `aliases` (optional). Source checkpoint: `checkpoint` (see Discovery).
+
+Top-level `rejected_ids` (optional): repositories rejected after verification. Each key is the repository's ID (see Item identity), used for name matching; each value is its `repo_id`, or `null` when unknown. Created on the first rejection; entries are kept.
+
+```json
+"rejected_ids": { "github.com/owner/repo": 123456789 }
+```
 
 ## Report additions
 Per finding: repository link; type; one-line purpose; created date; latest release or tag with date; license; activity (last commit month, release cadence if evident); documented requirements and self-hosting notes; security caveats found; evidence tier; relevance label and reason. Material changes show old → new values with evidence.
