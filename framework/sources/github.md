@@ -1,7 +1,7 @@
 # GitHub Source Guide
 
 ## Access paths
-Confirm at the start of each run which paths work and record them under Coverage. Use whichever tool is available; the framework does not depend on a specific integration.
+Confirm at the start of each run which paths work and record them in the report: under Coverage in Continuous runs, under Method in Deep runs. Use whichever tool is available; the framework does not depend on a specific integration.
 
 1. **GitHub MCP server (preferred when available)** — read-only tools only:
    - `search_repositories` — discovery with compact output (`minimal_output: true`); single-repository metadata with the query `repo:{owner}/{repo}` and full output (`minimal_output: false`).
@@ -12,7 +12,7 @@ Confirm at the start of each run which paths work and record them under Coverage
 3. **Git protocol** — `git ls-remote --tags https://github.com/{owner}/{repo}.git`; a metadata-only clone in scratch, `git clone --bare --filter=blob:none https://github.com/{owner}/{repo}.git`, for curated-list history and precise tag and commit dates.
 4. **Web pages** — README and documentation text, for purpose and requirements only.
 
-Pace requests to the path's rate limit. Count each discovery search request, including each page, against the search budget. Requests made to verify or re-verify a repository, including `repo:` searches, count only toward that repository's verification or re-verification.
+Pace requests to the path's rate limit. In Continuous runs, count each discovery search request, including each page, against the search budget. Requests made to verify or re-verify a repository, including `repo:` searches, count only toward that repository's verification or re-verification.
 
 If no path returns structured dates, verification is incomplete: report affected candidates as unverified leads. Tools that summarize pages can misstate dates and versions; take them only from raw API fields or Git output.
 

@@ -46,9 +46,15 @@ Required before enabling a schedule for a new framework or project, and after pr
 **V6 Periodic synthesis dry run**
 - [ ] Built only from existing daily reports; every finding links to its daily report and original source.
 
+**V7 Contract selection**
+- [ ] `Contract: continuous` loads `RESEARCH-CONTRACT.md` and `CONTINUOUS-AGENT-CONTRACT.md`; the V1–V6 runs use it.
+- [ ] `Contract: deep` with a subject and purpose loads `RESEARCH-CONTRACT.md` and `DEEP-AGENT-CONTRACT.md`; the run writes only its report under `reports/deep/` and leaves `state.json` and all other reports unchanged.
+- [ ] Each invalid invocation — no `Contract:` line, an unsupported name (for example `Contract: unknown`), and two `Contract:` lines — stops before any research and states the configuration error only in the run output.
+- [ ] After each invalid invocation, the test repository is unchanged: no change to `state.json` or `reports/`, no new report, no commit, push or email.
+
 ## Review
 
-- [ ] Evidence quality, coverage honesty and the invariants in `RESEARCH-CONTRACT.md` section 3.
+- [ ] Evidence quality, coverage honesty and the invariants in `RESEARCH-CONTRACT.md` section 3 and `CONTINUOUS-AGENT-CONTRACT.md` section 2.
 - [ ] Maintainer approval recorded before a schedule is enabled or a framework is published.
 
 ## Re-test after propagation

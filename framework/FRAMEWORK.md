@@ -1,6 +1,8 @@
 # Repo Scout Framework
 
-Specializes `RESEARCH-CONTRACT.md` for public source-code repositories, primarily on GitHub, in any technical domain. Each project supplies its subject, discovery inputs and relevance criteria. Nothing here weakens the contract's invariants (section 3).
+Specializes the URF contracts — `RESEARCH-CONTRACT.md` and the execution contracts — for public source-code repositories, primarily on GitHub, in any technical domain. Each project supplies its subject, discovery inputs and relevance criteria. Nothing here weakens their invariants (common contract section 3 and each execution contract's section 2).
+
+**Execution contracts.** Repo Scout's domain rules — target, item identity, relevance, verification and evidence, per-finding report fields, and the source guides with effective-source behavior — apply under both `Contract: continuous` and `Contract: deep`, where relevant. Its Continuous operational rules — coverage, state and checkpoints, the pending, rejected and historical lifecycle and re-verification, baseline and incremental runs, and the Continuous budgets and bounded-discovery defaults — apply only under `Contract: continuous`. Configured discovery inputs (queries, curated lists) define a Continuous run's discovery operations and coverage obligations; a Deep run may use relevant ones as starting inputs without being obliged to run them, and may formulate further searches and follow promising paths within the effective sources and the framework and project rules.
 
 Research is read-only: never install, build or execute repository code, use credentials, or open issues or pull requests. Git clones used for metadata live in a scratch location outside the project repository and are discarded after the run.
 
@@ -28,7 +30,7 @@ Projects define discovery inputs in `PROJECT.md` under `## Discovery inputs`: se
 
 The baseline window is worked in calendar-month sub-periods, oldest first, for new repositories and curated lists, so coverage advances contiguously and an interrupted baseline resumes at the next unchecked month. Established-repository discovery runs once across the whole baseline window (P = the fixed window), and its coverage is tracked separately; the baseline is complete only when all three methods reach the window end. An incremental run treats its whole search period as one sub-period for every method, so established discovery recurs in every run for the period since its coverage.
 
-Each query pass and each list read is one operation. Run every configured operation for the period; after an individual failure, continue with the remaining operations while the budget permits, and record each as complete, incomplete or unattempted (contract section 9).
+Each query pass and each list read is one operation. Run every configured operation for the period; after an individual failure, continue with the remaining operations while the budget permits, and record each as complete, incomplete or unattempted (common contract section 7; Continuous contract section 7).
 
 **Checkpoint.** When a run leaves a method's current period incomplete, store progress in that method's `sources` entry (the entry key names the method):
 
@@ -71,7 +73,7 @@ Outcomes:
 - Evidence tiers, stated per finding: **A** primary artifact (repository metadata, release, tag, commit, license file); **B** credible secondary source that links to the repository (maintainer announcement, documentation site); **C** community signal or unverified lead. Stars, forks and trending are discovery signals, not evidence of quality.
 
 ## Relevance
-Label each verified candidate **high**, **medium** or **low** against the project's relevance criteria, with a one-line reason. Consider scope match, substance (working code or documentation beyond a placeholder), maintenance (recent commits, releases, issue activity), a present and usable license, and adoption signals. High and medium items are reported as findings; low items are counted in Coverage only.
+Label each verified candidate **high**, **medium** or **low** against the project's relevance criteria, with a one-line reason. Consider scope match, substance (working code or documentation beyond a placeholder), maintenance (recent commits, releases, issue activity), a present and usable license, and adoption signals. High and medium items are reported as findings; low items are not findings, and in Continuous runs they are counted in Coverage only.
 
 ## Change indicators and material changes
 `fingerprint`: latest release tag, latest tag, archived flag, license SPDX ID, canonical name, default branch.
@@ -103,13 +105,13 @@ Coverage, per method and sub-period: each operation's status (complete, incomple
 Weekly synthesis: a deduplicated shortlist of the period's high-relevance findings and material changes; candidate experiments only if the project requests them.
 
 ## Defaults
-- Baseline window: 180 days.
-- Baseline budget: up to 3 runs; per run at most 40 search requests and 40 verifications.
-- Per-run budget: at most 20 search requests, 20 verifications and 10 re-verifications.
-- Search depth: 30 results per query pass. Web depth: 10 results per query.
+- Continuous baseline window: 180 days.
+- Continuous baseline budget: up to 3 runs; per run at most 40 search requests and 40 verifications.
+- Continuous per-run budget: at most 20 search requests, 20 verifications and 10 re-verifications.
+- Continuous search depth: 30 results per query pass. Continuous web depth: 10 results per query.
 - Established-pass star threshold: 500.
 - Weekly synthesis day: Friday.
 
 ## Departures from contract defaults
-- Coverage entries are keyed by discovery method (`github.com/search-new`, `github.com/search-established`, `github.com/lists`, `web-search`) even though the Allowed list is restricted, because one source hosts several independent methods. Each entry follows the contract's coverage rule.
+- Coverage entries are keyed by discovery method (`github.com/search-new`, `github.com/search-established`, `github.com/lists`, `web-search`) even though the Allowed list is restricted, because one source hosts several independent methods. Each entry follows the coverage rule of the Continuous contract (section 3).
 - Verification links are permitted (`framework/SOURCES.md`).
