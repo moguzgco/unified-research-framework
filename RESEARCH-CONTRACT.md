@@ -9,6 +9,7 @@ Research, in URF, means discovering, screening, verifying and reporting informat
 **Execution contract.** Every run's invocation selects exactly one execution contract with the line `Contract: <name>`. Supported contracts:
 
 - `continuous` → `framework/CONTINUOUS-AGENT-CONTRACT.md`
+- `deep` → `framework/DEEP-AGENT-CONTRACT.md`
 
 This contract is always loaded with the selected one and is never selected on its own. There is no default. A missing `Contract:` line, an unlisted name, or more than one `Contract:` line is a pre-execution configuration error: the run stops before any research, changes no research state, creates or modifies no persisted report, and states the error only in its run output. The fatal-error rule (section 7) does not apply.
 

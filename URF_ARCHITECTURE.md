@@ -237,7 +237,7 @@ Do not introduce separate indexes, databases, crawlers or additional infrastruct
 Keep the baseline and incremental-discovery rules lightweight and configurable.
 
 
-## 4. Common research workflow
+## 4. Continuous research workflow
 
 The general execution procedure is:
 
@@ -269,7 +269,7 @@ The general execution procedure is:
 
 The specialized framework determines the exact identity rules, evidence requirements and meaningful-change criteria for its target type.
 
-Every research execution produces a daily report, including partial and failed runs. A run rejected before execution because its contract selection is invalid produces no report; the error appears only in the run output.
+Every Continuous research execution produces a daily report, including partial and failed runs; a Deep run produces one Deep report. A run rejected before execution because its contract selection is invalid produces no report; the error appears only in the run output.
 
 Failed runs preserve the last successful research state.
 
@@ -287,14 +287,18 @@ Use genuine execution dates. Never fabricate dated research reports.
 RESEARCH CONTRACTS
 
 ```
-Common Research Contract            (RESEARCH-CONTRACT.md)
+Common Research Contract              (RESEARCH-CONTRACT.md)
          ↑
-Continuous Research Agent Contract  (CONTINUOUS-AGENT-CONTRACT.md)
+         ├── Continuous Research Agent Contract  (CONTINUOUS-AGENT-CONTRACT.md)
+         └── Deep Research Agent Contract        (DEEP-AGENT-CONTRACT.md)
 ```
 
 The common Research Contract defines what research means in URF and the rules all URF research shares. It is never selected or run on its own.
 
-An execution contract defines how a concrete research agent runs and follows the common contract. Each concrete agent selects exactly one execution contract in its invocation (`Contract: continuous`); a missing or unsupported selection is a configuration error. The only execution contract is currently the Continuous Research Agent Contract: incremental, coverage-based research with persistent state, run on a schedule or manually.
+An execution contract defines how a concrete research agent runs and follows the common contract. Each concrete agent selects exactly one execution contract in its invocation (`Contract: continuous` or `Contract: deep`); a missing or unsupported selection is a configuration error. The two execution contracts are siblings:
+
+- **Continuous Research Agent Contract** — incremental, coverage-based research with persistent state, run on a schedule or manually.
+- **Deep Research Agent Contract** — manual, bounded research on a stated subject and purpose, broad in discovery and deep in verification, producing one comprehensive report and no persistent state. It may create a baseline or reference landscape, or a higher-effort reference result for later comparison with Continuous output; it is not ground truth, and it never writes Continuous state or advances Continuous coverage.
 
 Execution contracts are not an additional hierarchy level: specialized frameworks and private projects configure research under whichever contract an agent selects.
 
@@ -394,7 +398,7 @@ The first Claude implementation session should read this document and any availa
 **Stage 1 — Review and plan (no file or Git changes):**
 
 1. Identify only material gaps, contradictions and unnecessary complexity.
-2. Propose the minimum URF file layout and responsibilities, avoiding duplicated instructions. The adopted layout is `README.md`, `URF_ARCHITECTURE.md` (this design reference), `RESEARCH-CONTRACT.md` (common contract), `CONTINUOUS-AGENT-CONTRACT.md` (Continuous execution contract), `PROPAGATION.md`, `VALIDATION.md` and minimal specialized-framework/private-project templates.
+2. Propose the minimum URF file layout and responsibilities, avoiding duplicated instructions. The adopted layout is `README.md`, `URF_ARCHITECTURE.md` (this design reference), `RESEARCH-CONTRACT.md` (common contract), `CONTINUOUS-AGENT-CONTRACT.md` and `DEEP-AGENT-CONTRACT.md` (execution contracts), `PROPAGATION.md`, `VALIDATION.md` and minimal specialized-framework/private-project templates.
 3. Explain how a framework branch and a separate private project repository are initialized and how the manual Propagation Agent operates.
 4. Present a short implementation plan and stop for explicit approval.
 

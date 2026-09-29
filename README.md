@@ -17,6 +17,7 @@ Lower layers override configurable parent defaults; the invariants in `RESEARCH-
 - `URF_ARCHITECTURE.md` — design reference. Not loaded at runtime.
 - `RESEARCH-CONTRACT.md` — common research contract copied into every project; not executed on its own.
 - `CONTINUOUS-AGENT-CONTRACT.md` — execution contract for Continuous (scheduled, incremental) research, selected with `Contract: continuous`; follows the common contract.
+- `DEEP-AGENT-CONTRACT.md` — execution contract for manual Deep research on a stated subject and purpose, selected with `Contract: deep`; follows the common contract.
 - `PROPAGATION.md` — manually invoked Propagation Agent.
 - `VALIDATION.md` — supervised validation checklist.
 - `templates/framework/`, `templates/project/` — starting files.
@@ -38,6 +39,16 @@ Lower layers override configurable parent defaults; the invariants in `RESEARCH-
    ```
    Run the research project in <owner>/<repository> on branch main.
    Contract: continuous
+   Follow framework/RESEARCH-CONTRACT.md exactly. Commit and push results before any email.
+   ```
+
+   A manual Deep run uses `Contract: deep` and states the subject, purpose and any constraints:
+
+   ```
+   Run the research project in <owner>/<repository> on branch main.
+   Contract: deep
+   Subject: <what to research>
+   Purpose: <what the result is for>
    Follow framework/RESEARCH-CONTRACT.md exactly. Commit and push results before any email.
    ```
 
