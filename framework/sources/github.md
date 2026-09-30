@@ -26,7 +26,7 @@ If no path returns structured dates, verification is incomplete: report affected
 - Established results that are already recorded (in `items` or `historical_ids`) are counted as repeated observations and are not re-verified unless due; report how many results read were not already recorded.
 
 ## Curated lists
-- List changes over P: in the metadata clone, process the commits in `git log --since=<P start> --until=<P end> -- <list files>` one by one. For each commit, compare the repository IDs (framework Item identity) linked in the list files immediately before it (its first parent) and after it; IDs linked only after it are that commit's additions. The additions over P are the union over all its commits, so a repository added and later removed within P is included; a comparison of only P's start and end does not satisfy this.
+- List changes over P: in the metadata clone, process the commits in `git log --first-parent --since=<P start> --until=<P end> <default branch> -- <list files>` one by one; commits reachable only through merged branches are not processed separately. For each commit, compare the repository IDs (framework Item identity) linked in the list files immediately before it (its first parent) and after it; IDs linked only after it are that commit's additions. The additions over P are the union over all its commits, so a repository added and later removed within P is included; a comparison of only P's start and end does not satisfy this.
 - A list repository that cannot be cloned or read makes the method unchecked for P.
 
 ## Verification
