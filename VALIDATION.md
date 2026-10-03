@@ -25,6 +25,8 @@ Required before enabling a schedule for a new framework or project, and after pr
 - [ ] IDs are stable; repeated observations are classified as such.
 - [ ] Older items seen for the first time are classified as first observations, not new.
 - [ ] Coverage advances only over verified periods.
+- [ ] A run during day D searches and covers date-bounded sources only through the last complete day (D−1, or the framework's time zone); no `covered_through` or `baseline.window.to` equals D.
+- [ ] A later run, after D has fully elapsed, searches D before advancing coverage past it; checkpoints and the `state.json` format are unchanged.
 
 **V3 Material change, reappearance and partial failure** (throwaway branch)
 - [ ] Altering the recorded change indicators of one or two items produces material-change findings with evidence; unchanged items are not flagged.
