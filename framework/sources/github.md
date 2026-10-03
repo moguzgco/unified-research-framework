@@ -17,7 +17,7 @@ Pace requests to the path's rate limit. In Continuous runs, count each discovery
 If no path returns structured dates, verification is incomplete: report affected candidates as unverified leads. Tools that summarize pages can misstate dates and versions; take them only from raw API fields or Git output.
 
 ## Repository search
-- Date qualifiers use whole days. New repositories: `created:YYYY-MM-DD..YYYY-MM-DD`. Established repositories: `pushed:>=YYYY-MM-DD` with `stars:>=<threshold>`.
+- Date qualifiers use whole UTC days: date-only `created:` and `pushed:` values match UTC timestamps (GitHub's documentation does not state this; observed 2026-10-03). The last complete day for every GitHub method is therefore the day before the current UTC date when the run starts, whatever the project's report date. New repositories: `created:YYYY-MM-DD..YYYY-MM-DD`. Established repositories: `pushed:>=YYYY-MM-DD` with `stars:>=<threshold>`.
 - `pushed:` filters on a repository's latest push date, not on pushes within a range: `pushed:2026-04-01..2026-04-30` returns only repositories whose last push fell in April. Never use a closed `pushed:` range for discovery.
 - Use compact results for discovery. Required fields per item: `full_name`, `id`, `created_at`, `fork` and `archived`. `pushed_at` is not required in discovery results: the `pushed:>=` qualifier already bounds activity, and `pushed_at` is retrieved at verification.
 - A result list is complete when `incomplete_results` is false, every page within the depth was read, the number of items read equals `min(depth, total_count)`, and every item has the required fields. Otherwise the pass is incomplete for that period.
