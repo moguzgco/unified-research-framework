@@ -60,7 +60,7 @@ Compute at the start of each run and list the result in the report.
 
 Execution contracts sequence these steps and may add their own.
 
-- **Record** the execution date, available tools and permissions. If Git push access is unavailable, stop and report; do not research without a way to persist.
+- **Record** the execution date, available tools and permissions. If Git push access is unavailable, stop before research: persist no report and change no research state; the error appears only in the run output.
 - **Discover** candidates within effective sources and budget.
 - **Screen** candidates against scope and relevance, and against anything else the execution contract adds.
 - **Verify** relevant candidates against original sources.
@@ -75,6 +75,7 @@ The execution contract defines report files, sections and classifications. In ev
 
 ## 7. Failures and validation
 
+- **Run status** — unless the execution contract defines it otherwise: `complete` when every operation the run required completed; `partial` when at least one completed and others did not; `failed` when none completed or a fatal error occurred. A fatal error is one that prevents the run from continuing, for example unreadable research state or a lost tool.
 - **Source failure** — record it in the report and continue with other sources. Status: partial.
 - **Operation failure** — within a source, continue independent operations after one fails while the budget permits. Report each operation as complete, incomplete (attempted but not fully retrieved) or unattempted (not run, with the reason). Candidates from an incomplete operation may be kept as unverified leads; the operation stays incomplete.
 - **Fatal error** — write a failed report with the reason; commit and push the report if possible.

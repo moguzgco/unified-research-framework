@@ -1,0 +1,26 @@
+{
+  "_comment": "Machine-readable parameters of this framework for tools/urf.py. Keep them consistent with framework/FRAMEWORK.md. Keys starting with _ are ignored.",
+  "profile_version": 1,
+  "id": { "prefix": "<id prefix, e.g. host/>", "lowercase": true, "pattern": "<regular expression every ID matches>" },
+  "secondary_key": "<field holding a stable source identifier, or null>",
+  "top_level": [],
+  "rejected_ids": false,
+  "item_required": ["<framework item fields required for a verified item>"],
+  "item_relevance": ["<relevance labels that make an item>"],
+  "reject_relevance": ["<labels that reject a lead>"],
+  "historical_keep": ["<identity fields kept when an item becomes inactive>"],
+  "lead_required": ["name", "first_seen", "category", "method", "period"],
+  "indicators": ["<fingerprint fields visible in discovery results>"],
+  "methods": {
+    "<coverage key>": {
+      "baseline": "month | window | recency",
+      "_completion": "Checks a recorded operation must pass to count as complete: [field, '==' or '>=', value | '$field' | {'min': ['$a', '$b']}]. Reaching a depth limit is never completion on its own.",
+      "completion": [["incomplete_results", "==", false]]
+    }
+  },
+  "queue": {
+    "order": ["category", "first_seen", "name_ci"],
+    "reserve": { "fraction": 0.25, "round": "up", "order": ["first_seen", "category", "name_ci"] }
+  },
+  "reverify_interval_days": 30
+}

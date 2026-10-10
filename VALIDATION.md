@@ -25,7 +25,7 @@ Required before enabling a schedule for a new framework or project, and after pr
 - [ ] IDs are stable; repeated observations are classified as such.
 - [ ] Older items seen for the first time are classified as first observations, not new.
 - [ ] Coverage advances only over verified periods.
-- [ ] A run during day D searches and covers date-bounded sources only through the last complete day (D−1, or the framework's time zone); no `covered_through` or `baseline.window.to` equals D.
+- [ ] A run during UTC day D searches and covers date-bounded sources only through the last complete day D−1; no `covered_through` of a date-bounded source, and no `baseline.window.to`, equals D. A recency-based method is covered through D.
 - [ ] A later run, after D has fully elapsed, searches D before advancing coverage past it; checkpoints and the `state.json` format are unchanged.
 
 **V3 Material change, reappearance and partial failure** (throwaway branch)
@@ -53,6 +53,13 @@ Required before enabling a schedule for a new framework or project, and after pr
 - [ ] `Contract: deep` with a subject and purpose loads `RESEARCH-CONTRACT.md` and `DEEP-AGENT-CONTRACT.md`; the run writes only its report under `reports/deep/` and leaves `state.json` and all other reports unchanged.
 - [ ] Each invalid invocation — no `Contract:` line, an unsupported name (for example `Contract: unknown`), and two `Contract:` lines — stops before any research and states the configuration error only in the run output.
 - [ ] After each invalid invocation, the test repository is unchanged: no change to `state.json` or `reports/`, no new report, no commit, push or email.
+
+**V9 State utility** (test repository or temporary copies)
+- [ ] `python3 -m unittest discover -s tools/tests` passes in the URF repository.
+- [ ] `urf.py validate --published` passes on the project's `state.json`, or its findings are repaired with approved `apply --repair` operations.
+- [ ] A run stopped before `finish` publishes nothing; `begin` on the same UTC date resumes it, and on a later date stops and leaves `.urf/run/` untouched.
+- [ ] After `finish`, `begin` stops until the published `state.json` and report are committed together.
+- [ ] The agent never loads the whole `state.json`; the report's Unverified leads section lists only this run's leads and counts for the rest.
 
 ## Review
 
