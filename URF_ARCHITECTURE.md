@@ -111,6 +111,18 @@ Ordinary web research should be sufficient wherever practical.
 
 APIs, CLIs and MCP integrations may optionally improve access to particular sources, but the framework must not depend on any specific integration.
 
+STATE UTILITY (approved exception)
+
+One minimal deterministic utility, `tools/urf.py` (a single Python file, standard library only), is part of URF and is copied into each project as `framework/tools/urf.py`. It performs no research and runs no service. Approved decisions:
+
+1. Relevance controls candidate acceptance and verification eligibility, never discovery stopping or source coverage.
+2. State is retained completely in JSON. Deterministic local processing selects what the agent needs; the agent never loads the whole state, and pending leads are never deleted to save tokens.
+3. State changes are validated operations with invariant checks and atomic JSON file replacement. The agent never regenerates the state file.
+4. An unfinished run is kept in local staging (`.urf/run/`, not committed) and resumed on the same UTC date; authoritative state and reports are published only by a successful finish. Incompatible staging is preserved and reported, never deleted automatically.
+5. The utility is minimal: research agents keep discovery, relevance judgement, evidence verification and reporting. Claude commits the published state and report together; the utility never manages Git.
+
+Framework-specific parameters (identity, secondary keys, completion checks per discovery method, verification order) live in each framework's `framework/state-profile.json`, so the utility holds no domain logic. Single maintainer and single run: no locks, concurrency control or rollback machinery.
+
 CLAUDE EXECUTION
 
 Claude recurring agents perform research using their available tools.
@@ -131,7 +143,7 @@ Each private project maintains:
 
 Reports preserve research history and original source references.
 
-State is a compact index for deduplication, previous observations and execution progress: active items, compact historical records, pending leads, the fixed baseline window, per-source coverage dates and optional source-native checkpoints when useful for that research type. Detailed evidence and history belong in dated reports and Git. State is not a database or duplicate report archive.
+State is a complete, compact index, accessed through the state utility, for deduplication, previous observations and execution progress: active items, compact historical records, pending leads, the fixed baseline window, per-source coverage dates and optional source-native checkpoints when useful for that research type. Detailed evidence and history belong in dated reports and Git. State is not a database or duplicate report archive.
 
 Do not introduce additional persistent storage systems.
 
@@ -194,7 +206,7 @@ After the baseline, scheduled runs should perform incremental research.
 
 Use previous reports and state.json to identify previously researched items and periods.
 
-Avoid repeatedly inspecting unchanged sources or rediscovering previously processed findings. Retain compact historical identifiers even when items are no longer active. When a source is only partially checked, do not silently advance its discovery checkpoint beyond verified coverage.
+Avoid repeatedly inspecting unchanged sources or rediscovering previously processed findings. Retain compact historical identifiers even when items are no longer active. When a source is only partially checked, do not silently advance its coverage beyond verified coverage.
 
 Each specialized framework defines appropriate source-specific change indicators.
 
@@ -273,7 +285,7 @@ Every Continuous research execution produces a daily report, including partial a
 
 Failed runs preserve the last successful research state.
 
-Partial runs may retain verified findings while disclosing incomplete coverage. Do not advance a source checkpoint for work that was not completed.
+Partial runs may retain verified findings while disclosing incomplete coverage. Do not advance a source's coverage for work that was not completed.
 
 Periodic reports use daily reports as their primary source and link to original findings.
 
@@ -390,6 +402,10 @@ Ordinary updates apply prospectively. Do not rewrite historical reports or autom
 
 Parent changes are made manually by one maintainer and are expected to be infrequent. Do not add automated propagation, complex versioning, migration frameworks, branch synchronization services, continuous monitoring or team-oriented approval infrastructure.
 
+
+## Open correctness issues
+
+- **Inputs added after coverage (audit L-4).** Coverage records that the operations configured when a period was checked completed. A query, list or other discovery input added later has not been run over periods already covered, and nothing yet records or discloses that. Resolve before newly added inputs can be treated as historically covered.
 
 ## 9. Minimal implementation and handoff
 

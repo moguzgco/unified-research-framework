@@ -3,3 +3,11 @@ INITIALIZATION_PROMPT.md
 PROJECT_DESCRIPTION.md
 PROJECT_INSTRUCTIONS.md
 SETUP_GUIDE.md
+
+# Local files that must never be published
+Claude outputs/
+.DS_Store
+
+# Local run staging of the state utility
+.urf/
+__pycache__/

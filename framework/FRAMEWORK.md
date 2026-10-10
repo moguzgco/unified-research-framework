@@ -28,7 +28,7 @@ Projects define discovery inputs in `PROJECT.md` under `## Discovery inputs`: se
 | Curated lists (`github.com/lists`) | For each configured list repository, read the changes to its list files over P from Git history. | Every configured list's changes over P were read, in this run or through a valid checkpoint, and every repository added to its list files during P screened. A repository is added when a commit in P on the first-parent history of the list repository's default branch links a repository ID (see Item identity) that the list files did not link immediately before that commit; moving, reformatting, sorting or editing a line without introducing a new repository ID is not an addition, and a repository added and later removed within P is still an addition. |
 | Web search (`web-search`) | Run each web query with results restricted to effective Allowed domains; screen the top results to the web depth. | Search engines do not bound dates reliably, so this method is checked only for the run date: every query ran and its top results were screened. Coverage advances to the run date and the report labels the method recency-based. |
 
-The baseline window is worked in calendar-month sub-periods, oldest first, for new repositories and curated lists, so coverage advances contiguously and an interrupted baseline resumes at the next unchecked month. Established-repository discovery runs once across the whole baseline window (P = the fixed window), and its coverage is tracked separately; the baseline is complete only when all three methods reach the window end. An incremental run treats its whole search period as one sub-period for every method, so established discovery recurs in every run for the period since its coverage.
+The baseline window is worked in calendar-month sub-periods, oldest first, for new repositories and curated lists, so coverage advances contiguously and an interrupted baseline resumes at the next unchecked month. Established-repository discovery runs once across the whole baseline window (P = the fixed window), and its coverage is tracked separately; the baseline is complete only when every enabled method reaches the window end. An incremental run treats its whole search period as one sub-period for every method, so established discovery recurs in every run for the period since its coverage.
 
 Each query pass and each list read is one operation. Run every configured operation for the period; after an individual failure, continue with the remaining operations while the budget permits, and record each as complete, incomplete or unattempted (common contract section 7; Continuous contract section 7).
 
@@ -54,7 +54,7 @@ Using search and list metadata only, before verification:
 - Map forks, mirrors and renamed repositories to their IDs.
 - Match candidates to pending leads by `repo_id`, then by name (case-insensitive). Add a missing `repo_id` to a name-only lead, and update `name` when a lead's `repo_id` appears under a new name; keep the lead's `first_seen`, method and period.
 - Skip candidates in `rejected_ids` and count them as previously rejected. A candidate matches an entry by `repo_id` when both are known, otherwise by ID (see Item identity).
-- Skip recorded items whose visible indicators (archived flag, default branch) show no possible material change and whose re-verification is not due; count them as repeated observations. Full metadata, including `pushed_at`, is retrieved only when verifying.
+- Skip recorded items whose visible indicators (archived flag, default branch) show no changed indicator and whose re-verification is not due; count them as repeated observations. Full metadata, including `pushed_at`, is retrieved only when verifying.
 - Drop placeholders and candidates clearly outside the project's scope.
 - Add the rest to `pending_leads`; verification follows *Pending leads* below.
 
@@ -91,6 +91,10 @@ Active items: every 30 days, whether or not they appear in current search result
 ## Additional state fields
 Item fields: `name` (current `owner/repo`), `repo_id`, `created`, `latest_release`, `license`, `relevance`, `aliases` (optional). Source checkpoint: `checkpoint` (see Discovery).
 
+Coverage entries in `sources` are keyed by discovery method (`github.com/search-new`, `github.com/search-established`, `github.com/lists`, `web-search`), because one source hosts several independent methods; each entry follows the coverage rule of the Continuous contract (section 3).
+
+`framework/state-profile.json` is the machine-readable form of this framework's state rules for the state utility; it must stay consistent with this file.
+
 Top-level `rejected_ids` (optional): repositories rejected after verification. Each key is the repository's ID (see Item identity), used for name matching; each value is its `repo_id`, or `null` when unknown. Created on the first rejection; entries are kept.
 
 ```json
@@ -113,5 +117,4 @@ Weekly synthesis: a deduplicated shortlist of the period's high-relevance findin
 - Weekly synthesis day: Friday.
 
 ## Departures from contract defaults
-- Coverage entries are keyed by discovery method (`github.com/search-new`, `github.com/search-established`, `github.com/lists`, `web-search`) even though the Allowed list is restricted, because one source hosts several independent methods. Each entry follows the coverage rule of the Continuous contract (section 3).
 - Verification links are permitted (`framework/SOURCES.md`).

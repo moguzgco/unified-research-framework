@@ -1,0 +1,31 @@
+{
+  "profile_version": 1,
+  "id": { "prefix": "github.com/", "lowercase": true, "pattern": "^github\\.com/[a-z0-9._-]+/[a-z0-9._-]+$" },
+  "secondary_key": "repo_id",
+  "top_level": ["rejected_ids"],
+  "rejected_ids": true,
+  "item_required": ["name", "repo_id", "created", "license", "latest_release", "relevance", "category"],
+  "item_relevance": ["high", "medium"],
+  "reject_relevance": ["low", "out_of_scope"],
+  "historical_keep": ["repo_id", "name", "aliases"],
+  "lead_required": ["name", "first_seen", "category", "method", "period"],
+  "indicators": ["archived", "default_branch"],
+  "methods": {
+    "github.com/search-new": { "baseline": "month", "completion": [
+      ["incomplete_results", "==", false], ["fields_complete", "==", true],
+      ["pages_read", "==", "$pages_required"], ["items_read", "==", { "min": ["$depth", "$total_count"] }] ] },
+    "github.com/search-established": { "baseline": "window", "completion": [
+      ["incomplete_results", "==", false], ["fields_complete", "==", true],
+      ["pages_read", "==", "$pages_required"], ["items_read", "==", { "min": ["$depth", "$total_count"] }] ] },
+    "github.com/lists": { "baseline": "month", "completion": [
+      ["clone_ok", "==", true], ["commits_processed", "==", "$commits_selected"],
+      ["additions_screened", "==", "$additions_found"] ] },
+    "web-search": { "baseline": "recency", "completion": [
+      ["results_screened", "==", { "min": ["$depth", "$results_available"] }] ] }
+  },
+  "queue": {
+    "order": ["category", "first_seen", "name_ci"],
+    "reserve": { "fraction": 0.25, "round": "up", "order": ["first_seen", "category", "name_ci"] }
+  },
+  "reverify_interval_days": 30
+}
