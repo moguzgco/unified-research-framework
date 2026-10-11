@@ -76,7 +76,7 @@ Steps marked *common* are defined in common section 5.
 4. Screen the candidates `record` returns as new or changed against scope and relevance (*common*); add leads and screening drops with `apply`.
 5. Take the leads to verify, and the items due for re-verification, from `queue`. Verify them against original sources (*common*); analyze relevance and extract the framework's target fields (*common*).
 6. Compare with previous observations and classify each item (section 6), using the framework's identity and change rules; handle reappearing historical IDs as in section 4. Record every outcome with `apply`.
-7. Write the daily report (section 6), using `summary` for the Coverage, State changes and Unverified leads sections.
+7. Write the daily report (section 6), using `summary` for the Coverage, State changes and Unverified leads sections, and its generated run accounting (per-operation counts and verification by slot and category), unchanged. The agent never reconstructs these counts; `finish` appends the accounting if it is missing and rejects an edited copy.
 8. On the configured synthesis day, write the periodic report from the period's daily reports.
 9. Run `finish`, which validates (common section 7 and section 7 below) and publishes `state.json` and the report together. Commit both in one commit and push; confirm the push succeeded.
 10. If email is configured and a delivery tool is available, send it (common section 8).
@@ -114,6 +114,8 @@ Effective sources and, for each, checked / partial / failed and the window cover
 ```
 
 Items verified, added, changed, dropped or attempted in this run are listed individually and each follows common section 6. Repeated observations screened without verification, and leads carried over unchanged from earlier runs, are reported as counts (per method, and per category and first-seen date for leads); every pending lead remains in `state.json`. Periodic reports synthesize daily reports only, link each finding to its daily report and original source, and add no unverified claims.
+
+A budget above the configured value applies only under a one-time maintainer authorization naming the execution date (`budget_override`, `UTILITY.md`); the report states it.
 
 ## 7. Failures and validation
 

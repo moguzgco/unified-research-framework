@@ -13,7 +13,7 @@ Run from the project root: `python3 -I framework/tools/urf.py <command> …`. In
 | `apply --file <file>` | Apply a batch of change operations, all or nothing. |
 | `queue --n <N>` | Leads to verify now, and items due for re-verification. |
 | `show --id <ID> [--id …]` | Records of specific entries. |
-| `summary` | Counts, derived status and Markdown for the Coverage, State changes and Unverified leads sections. |
+| `summary` | Counts, derived status and Markdown for the Coverage, State changes and Unverified leads sections, and the generated run accounting. |
 | `finish --status complete\|partial\|failed --report <file> [--fatal <reason>]` | Validate and publish `state.json` and the report. |
 | `validate [--published]` | Check invariants without writing. |
 | `discard` | Maintainer only: move unusable staging to `.urf/preserved/`. |
@@ -33,6 +33,8 @@ Config file:
 
 `push_available` states truthfully whether the run can push (`true` or `false`). `publication_mode` is `automatic` (the default: push access required) or `manual-supervised`, which also needs `maintainer_authorization`, the maintainer's explicit authorization text naming the run's execution date (`YYYY-MM-DD`). It is for supervised runs only, never unattended ones (`RESEARCH-CONTRACT.md` section 5): `finish` then requires the report to state that publication is pending maintainer push, and its output lists the files as `written_locally` with `remote_publication` pending, not as published. Send no email.
 
+`budget_override` (optional) raises or lowers named budgets for this run only: `{ "budgets": { "search": 40 }, "authorization": "<maintainer's text naming the execution date>" }`. `begin` refuses it (exit 3) without an authorization naming the run's execution date, or when it names an unknown budget or a value that is not a non-negative integer. The manifest records the base and overridden budgets and the authorization; the next run uses its own configuration again. The override stays a hard limit.
+
 Take budgets, window and methods from `PROJECT.md` and the framework defaults (project overrides win); `baseline_budgets` applies only to baseline runs; omit `reverify_interval_days` to use the framework value. `methods` lists the enabled discovery methods with their shared config string and operations (the exact query text, or `owner/repo` for a list).
 
 `--now` is the run start time; its UTC date is the execution date and the last complete day is the day before. The plan gives the run type, the baseline window, each method's search periods (baseline sub-periods oldest first), operations reusable from a valid checkpoint, budgets, counts and warnings.
@@ -51,7 +53,7 @@ Take budgets, window and methods from `PROJECT.md` and the framework defaults (p
 
 `status` is `complete`, `incomplete` or `unattempted`. The fields after `requests` are those the profile's completion checks name for the method; a `complete` status that fails a check is recorded as `incomplete` with the reasons. `requests` counts against the search budget. To reuse an operation from the plan's `reusable` list: `{"method": …, "period": …, "op": …, "reuse": true}`, adding `"confirmed": true` when the plan marks it `needs_confirmation` (a legacy report: confirm it records the operation as complete).
 
-Returns counts per class (`new`, `item`, `historical`, `rejected`, `pending`, `dup_in_run`) and, in full, only: `new` candidates; recorded items whose visible indicators or name changed (`changed_items`); historical entries seen again; pending leads that gained an identifier or name (`enrich`).
+The classification counts and the IDs of new candidates are kept with the operation record in staging; the run accounting is generated from them. Returns counts per class (`new`, `item`, `historical`, `rejected`, `pending`, `dup_in_run`) and, in full, only: `new` candidates; recorded items whose visible indicators or name changed (`changed_items`); historical entries seen again; pending leads that gained an identifier or name (`enrich`).
 
 ### apply
 
@@ -77,13 +79,13 @@ Results for accepted and rejected leads include the lead's `discovery_period`, u
 
 ### queue, show, summary
 
-`queue --n N` returns at most `N` leads, limited by the remaining verification budget: the reserve (the profile's fraction of `N`, rounded up, oldest first) and then the normal order; leads already attempted in the run are excluded. It also lists items due for re-verification, oldest `last_verified` first, limited by the remaining re-verification budget, with the total due.
+`queue --n N` returns at most `N` leads, limited by the remaining verification budget: the reserve (the profile's fraction of `N`, rounded up, oldest first) and then the normal order; leads already attempted in the run are excluded. The slot (`reserve` or `normal`) of every lead it returns is kept in staging (the first assignment wins); verification outcomes record it with the lead's category and first-seen date. It also lists items due for re-verification, oldest `last_verified` first, limited by the remaining re-verification budget, with the total due.
 
-`summary` returns the coverage each method would reach, the derived run status, counters, the IDs the report must list, and Markdown: a coverage table with every operation's status, the state changes, and the Unverified leads section (leads added this run, temporary failures this run, and backlog counts by category and first-seen date).
+`summary` returns the coverage each method would reach, the derived run status, counters, the IDs the report must list, and Markdown: a coverage table with every operation's status, the state changes, and the Unverified leads section (leads added this run, temporary failures this run, and backlog counts by category and first-seen date). `markdown.accounting` is the run accounting the report must carry unchanged: budgets used and any override, search requests by operation kind, a per-operation table (total, read, requests, candidates, new leads added, dropped and not handled, already pending, recorded items, historical, previously rejected, duplicates in the run, not already recorded) and verification outcomes by slot and by category. It is generated only from the persisted records of `record`, `queue` and `apply`, between `<!-- urf-accounting:begin -->` and `<!-- urf-accounting:end -->`.
 
 ### finish
 
-Checks that the requested status matches the operation outcomes (`failed` for partial outcomes needs `--fatal <reason>`); that the report states the execution date, `Status: <status>`, any fatal reason and every ID acted on in the run; and every invariant. It appends a machine-readable `urf-ops` block to the report, then writes the report (`reports/daily/<date>.md`, or the next free suffix) and `state.json`, and prints the commit command. A failed run publishes the report and `last_run` only. Commit both files together. If publication was interrupted, run `finish` again.
+Checks that the requested status matches the operation outcomes (`failed` for partial outcomes needs `--fatal <reason>`); that the report states the execution date, `Status: <status>`, any fatal reason and every ID acted on in the run; and every invariant. It regenerates the run accounting: a report that carries the block must carry it unchanged (otherwise the report is rejected; run `summary` again after the last change); a report without it gets it appended. It appends a machine-readable `urf-ops` block to the report, then writes the report (`reports/daily/<date>.md`, or the next free suffix) and `state.json`, and prints the commit command. A failed run publishes the report and `last_run` only. Commit both files together. If publication was interrupted, run `finish` again.
 
 ## Invariants
 

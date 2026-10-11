@@ -23,6 +23,9 @@ RUN_REPORT = "@run-report"
 STAGING = os.path.join(".urf", "run")
 PRESERVED = os.path.join(".urf", "preserved")
 OPS_RE = re.compile(r"<!-- urf-ops\n(.*?)\n-->", re.S)
+ACC_BEGIN, ACC_END = "<!-- urf-accounting:begin -->", "<!-- urf-accounting:end -->"
+ACC_RE = re.compile(re.escape(ACC_BEGIN) + r".*?" + re.escape(ACC_END), re.S)
+OUTCOMES = ("lead.accept", "lead.reject", "lead.fail")
 REPAIR_OPS = {"source.set_coverage", "baseline.set_window", "item.add_alias", "lead.resolve"}
 
 
@@ -467,11 +470,13 @@ def cmd_begin(pr, a):
     budgets = dict(cfg["budgets"])
     if plan["type"] == "baseline" and cfg.get("baseline_budgets"):
         budgets.update(cfg["baseline_budgets"])
+    override = budget_override(cfg, run_date, budgets)
     interval = cfg.get("reverify_interval_days", pr.P.get("reverify_interval_days"))
     manifest = {"run_date": run_date.isoformat(), "lcd": lcd.isoformat(), "started_at": now.isoformat(),
                 "phase": "staged", "base_sha": sha(raw.encode("utf-8")), "config_sha": pr.config_sha(cfg),
                 "format": detect_format(raw), "budgets": budgets, "reverify_interval_days": interval,
-                "plan": plan, "targets": None, "status": None, "publication_mode": mode}
+                "plan": plan, "targets": None, "status": None, "publication_mode": mode,
+                "budget_override": override}
     work = {"state": st, "base": st, "ops": [], "seen_ids": [], "seen_sk": [], "log": [], "attempted": [],
             "reverified": [], "counters": {"search": 0, "verify": 0, "reverify": 0}}
     os.makedirs(pr.stage, exist_ok=True)
@@ -500,6 +505,24 @@ def publication_mode(cfg, run_date):
     else:
         raise Fail(3, f"unsupported publication_mode {mode!r}")
     return mode
+
+
+def budget_override(cfg, run_date, budgets):
+    """One-time budget override for this run only, authorized by the maintainer
+    for its execution date. Updates budgets in place; returns the record or None."""
+    bo = cfg.get("budget_override")
+    if bo is None:
+        return None
+    auth = bo.get("authorization") if isinstance(bo, dict) else None
+    if not isinstance(auth, str) or run_date.isoformat() not in auth:
+        raise Fail(3, "budget_override needs an authorization naming this run's execution date")
+    new = bo.get("budgets")
+    if not isinstance(new, dict) or not new or any(
+            k not in budgets or not isinstance(v, int) or isinstance(v, bool) or v < 0 for k, v in new.items()):
+        raise Fail(3, "budget_override.budgets must set existing budgets to non-negative integers")
+    base = dict(budgets)
+    budgets.update(new)
+    return {"base": base, "budgets": dict(new), "authorization": auth}
 
 
 def counts(st, P, run_date, interval):
@@ -594,8 +617,10 @@ def cmd_record(pr, a):
     w["counters"]["search"] += requests
     classes, out = classify(pr, w, rec.get("candidates", []))
     metrics = {k: v for k, v in rec.items() if k not in ("candidates", "method", "period", "op", "status")}
+    new_ids = [c.get("id") or pr.I.derive(c["name"]) for c in out["new"]]
     w["ops"].append({"method": meth, "period": per, "op": op, "status": status, "reasons": reasons, **metrics,
-                     "candidates": len(rec.get("candidates", []))})
+                     "candidates": len(rec.get("candidates", [])), "classes": classes, "new_ids": new_ids,
+                     "kind": "configured"})
     pr.save(work=w)
     return {"status": status, "reasons": reasons, "classes": classes, **out,
             "search_used": w["counters"]["search"]}
@@ -700,6 +725,8 @@ def apply_change(pr, st, w, ch, run_date, plan, repair):
         if ch["id"] in w["attempted"]:
             raise Fail(2, f"lead {ch['id']} was already attempted in this run")
         w["attempted"].append(ch["id"])
+        log.update(category=lead.get("category"), first_seen=lead.get("first_seen"),
+                   slot=w.get("slots", {}).get(ch["id"], "unqueued"))
         w["counters"]["verify"] += 1
         if op == "lead.fail":
             log["temporary"] = True
@@ -845,6 +872,11 @@ def cmd_queue(pr, a):
     reserve = sorted(pool, key=sort_key(rq["order"], I))[:r] if rq else []
     taken = {I.lead_id(l) for l in reserve}
     rest = [l for l in sorted(pool, key=sort_key(q["order"], I)) if I.lead_id(l) not in taken][:n - r]
+    slots = w.setdefault("slots", {})
+    for name, group in (("reserve", reserve), ("normal", rest)):
+        for l in group:
+            slots.setdefault(I.lead_id(l), name)
+    pr.save(work=w)
     interval = dt.timedelta(days=m["reverify_interval_days"])
     rd = D(m["run_date"])
     due = sorted(((v["last_verified"], k) for k, v in st["items"].items()
@@ -915,6 +947,59 @@ def coverage(m, w):
     return st, result, status
 
 
+def accounting(m, w):
+    """Required run accounting, generated only from persisted operation records
+    (record, queue, apply). Reports carry it unchanged between the markers."""
+    b, c = m["budgets"], w["counters"]
+    L = [ACC_BEGIN, "### Run accounting (generated by the state utility)", ""]
+    L.append("Budgets used: " + ", ".join(f"{k} {c.get(k, 0)} of {b[k]}" for k in ("search", "verify", "reverify") if k in b) + ".")
+    bo = m.get("budget_override")
+    if bo:
+        L.append("Budget override (one-time, maintainer-authorized for this run): " +
+                 ", ".join(f"{k} {bo['base'].get(k)} → {v}" for k, v in sorted(bo["budgets"].items())) +
+                 f". Authorization: {bo['authorization']}")
+    kinds = {}
+    for o in w["ops"]:
+        kinds[o.get("kind", "configured")] = kinds.get(o.get("kind", "configured"), 0) + int(o.get("requests", 0) or 0)
+    L.append("Search requests by operation kind: " + (", ".join(f"{k} {v}" for k, v in sorted(kinds.items())) or "none") + ".")
+    added = {l["id"] for l in w["log"] if l["op"] == "lead.add"}
+    dropped = {l["id"] for l in w["log"] if l["op"] == "screen.drop"}
+    L += ["", "#### Discovery operations", "",
+          "| Method | Period | Operation | Status | Total | Read | Requests | Candidates | New leads | Dropped | New, not handled | Already pending | Recorded items | Historical | Previously rejected | Duplicates in run | Not already recorded |",
+          "|" + "---|" * 17]
+    for o in w["ops"]:
+        cl = o.get("classes")
+        head = [o["method"], o["period"] + (f" [{o['part']}]" if o.get("part") else ""), f"`{o['op']}`", o["status"]]
+        if cl is None:
+            L.append("| " + " | ".join(head + ["—"] * 13) + " |")
+            continue
+        new = set(o.get("new_ids", []))
+        na, nd = len(new & added), len(new & dropped)
+        nums = [o.get("total_count", "—"), o.get("items_read", "—"), o.get("requests", "—"), o.get("candidates", "—"),
+                na, nd, len(new) - na - nd, cl.get("pending", 0), cl.get("item", 0), cl.get("historical", 0),
+                cl.get("rejected", 0), cl.get("dup_in_run", 0), o.get("candidates", 0) - cl.get("dup_in_run", 0) - cl.get("item", 0)]
+        L.append("| " + " | ".join(head + [str(x) for x in nums]) + " |")
+    outs = [l for l in w["log"] if l["op"] in OUTCOMES]
+    cols = [o for o in OUTCOMES]
+    names = {"lead.accept": "Accepted", "lead.reject": "Rejected", "lead.fail": "Temporary failures"}
+
+    def table(title, key):
+        rows = {}
+        for l in outs:
+            rows.setdefault(l.get(key), {}).setdefault(l["op"], 0)
+            rows[l.get(key)][l["op"]] += 1
+        T = ["", f"#### Verification by {title}", "", f"| {title.capitalize()} | " + " | ".join(names[x] for x in cols) + " | Total |",
+             "|" + "---|" * (len(cols) + 2)]
+        for k in sorted(rows, key=lambda x: (x is None, str(x))):
+            T.append(f"| {k if k is not None else 'unknown'} | " + " | ".join(str(rows[k].get(x, 0)) for x in cols) +
+                     f" | {sum(rows[k].values())} |")
+        T.append("| Total | " + " | ".join(str(sum(1 for l in outs if l['op'] == x)) for x in cols) + f" | {len(outs)} |")
+        return T
+    L += table("slot", "slot") + table("category", "category")
+    L.append(ACC_END)
+    return "\n".join(L)
+
+
 def acted_ids(w):
     return sorted({l["id"] for l in w["log"] if l["op"] != "item.observe" and l.get("id")})
 
@@ -950,9 +1035,9 @@ def cmd_summary(pr, a):
                  for fs, n in sorted(backlog[c].items())]
     md_changes = [f"- `{k}`: {len(v)}" for k, v in sorted(by.items())]
     return {"derived_status": status, "type": m["plan"]["type"], "counters": w["counters"], "budgets": m["budgets"],
-            "coverage": cov, "acted_ids": acted_ids(w),
+            "budget_override": m.get("budget_override"), "coverage": cov, "acted_ids": acted_ids(w),
             "markdown": {"coverage": "\n".join(md_cov), "unverified_leads": "\n".join(md_leads),
-                         "state_changes": "\n".join(md_changes) or "None"}}
+                         "state_changes": "\n".join(md_changes) or "None", "accounting": accounting(m, w)}}
 
 
 def cmd_finish(pr, a):
@@ -987,8 +1072,15 @@ def cmd_finish(pr, a):
         if a.status != "failed":
             low = report.lower()
             problems += [f"report does not list {i}" for i in acted_ids(w) if i.lower() not in low]
+        acc = accounting(m, w)
+        found = ACC_RE.search(report)
+        if found and found.group(0) != acc:
+            problems.append("the generated accounting block in the report differs from the persisted records; "
+                            "insert the current `summary` accounting unchanged, or remove it to have it appended")
         if problems:
             raise Fail(2, "report rejected", problems=problems)
+        if not found:
+            report = report.rstrip("\n") + "\n\n" + acc + "\n"
         if not OPS_RE.search(report):
             ops = [{k: o[k] for k in ("method", "period", "op", "status", "evidence") if k in o} for o in w["ops"]]
             report = report.rstrip("\n") + "\n\n<!-- urf-ops\n" + json.dumps({"ops": ops}) + "\n-->\n"

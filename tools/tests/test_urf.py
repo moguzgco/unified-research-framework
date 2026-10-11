@@ -700,6 +700,135 @@ class PublicationModeTests(Base):
         self.assertEqual(r.state()["sources"][NEW]["covered_through"], "2026-10-09")  # coverage rules unchanged
 
 
+# ------------------------------------------------------------------ run accounting (stage 1)
+
+def acc_rows(md, header):
+    """Table rows (as cell lists) following a '#### header' line in the accounting block."""
+    lines = md.split("\n")
+    i = lines.index("#### " + header)
+    rows = [l for l in lines[i + 1:] if l.startswith("|")]
+    out = []
+    for l in rows[2:]:
+        out.append([c.strip() for c in l.strip("|").split("|")])
+        if l.startswith("| Total"):
+            break
+    return out
+
+
+class AccountingTests(Base):
+    AUTH = "Maintainer authorizes a one-time budget override for the run on 2026-10-10."
+
+    def test_per_operation_counts_from_records(self):
+        st = incremental_state(items={"github.com/c/z": item("c/z", 3)}, pending_leads=[lead("d/w", 4)],
+                               rejected_ids={"github.com/e/v": 5})
+        r = self.repo(st)
+        r.begin()
+        cands = [{"name": "a/x", "repo_id": 1}, {"name": "b/y", "repo_id": 2}, {"name": "f/u", "repo_id": 6},
+                 {"name": "c/z", "repo_id": 3}, {"name": "d/w", "repo_id": 4}, {"name": "e/v", "repo_id": 5}]
+        r.record(op(NEW, PER, Q1, cands=cands, total_count=40, items_read=30))
+        r.record(op(NEW, PER, Q2, cands=[{"name": "a/x", "repo_id": 1}, {"name": "g/t", "repo_id": 7}]))
+        r.record(op(EST, PER, Q1, cands=[{"name": "c/z", "repo_id": 3}]))
+        r.record(op(EST, PER, Q2))
+        self.assertEqual(r.apply([{"op": "lead.add", "name": "a/x", "repo_id": 1, "category": 1, "method": NEW, "period": PER},
+                                  {"op": "screen.drop", "name": "b/y", "reason": "out of scope"},
+                                  {"op": "lead.add", "name": "g/t", "repo_id": 7, "category": 2, "method": NEW, "period": PER},
+                                  {"op": "item.observe", "id": "github.com/c/z"}])[0], 0)
+        md = r.ok("summary")["markdown"]["accounting"]
+        rows = acc_rows(md, "Discovery operations")
+        # Total, Read, Requests, Candidates, New leads, Dropped, New not handled, Pending, Recorded, Historical, Rejected, Dup, Not recorded
+        self.assertEqual(rows[0][4:], ["40", "30", "1", "6", "1", "1", "1", "1", "1", "0", "1", "0", "5"])
+        self.assertEqual(rows[1][4:], ["2", "2", "1", "2", "1", "0", "0", "0", "0", "0", "0", "1", "1"])
+        self.assertEqual(rows[2][4:], ["1", "1", "1", "1", "0", "0", "0", "0", "0", "0", "0", "1", "0"])  # seen earlier in the run
+        self.assertIn("Search requests by operation kind: configured 4.", md)
+        text = "2026-10-10 Status: complete github.com/a/x github.com/b/y github.com/g/t"
+        r.ok("finish", "--status", "complete", "--report", r.report(text))
+        with open(os.path.join(r.root, "reports/daily/2026-10-10.md")) as f:
+            pub = f.read()
+        self.assertIn(md, pub)  # appended verbatim from persisted records
+        self.assertLess(pub.index(urf.ACC_END), pub.index("<!-- urf-ops"))
+
+    def test_verification_by_slot_and_category(self):
+        leads = [lead("a/old", 1, cat=2, first="2026-09-01"), lead("b/one", 2, cat=1, first="2026-10-01"),
+                 lead("c/two", 3, cat=1, first="2026-10-02"), lead("d/three", 4, cat=3, first="2026-10-03")]
+        r = self.repo(incremental_state(pending_leads=leads))
+        r.begin()
+        self.full_discovery(r)
+        q = r.ok("queue", "--n", "3")
+        self.assertEqual([l["name"] for l in q["reserve"]], ["a/old"])
+        self.assertEqual([l["name"] for l in q["normal"]], ["b/one", "c/two"])
+        r.ok("queue", "--n", "3")  # repeated queue calls keep the first slot assignment
+        out = r.apply([{"op": "lead.accept", "id": "github.com/a/old", "item": item("a/old", 1)},
+                       {"op": "lead.reject", "id": "github.com/b/one", "relevance": "low", "reason": "r"},
+                       {"op": "lead.fail", "id": "github.com/c/two", "reason": "timeout"},
+                       {"op": "lead.fail", "id": "github.com/d/three", "reason": "timeout"}])
+        self.assertEqual(out[0], 0, out)
+        md = r.ok("summary")["markdown"]["accounting"]
+        self.assertEqual(acc_rows(md, "Verification by slot"),
+                         [["normal", "0", "1", "1", "2"], ["reserve", "1", "0", "0", "1"],
+                          ["unqueued", "0", "0", "1", "1"], ["Total", "1", "1", "2", "4"]])
+        self.assertEqual(acc_rows(md, "Verification by category"),
+                         [["1", "0", "1", "1", "2"], ["2", "1", "0", "0", "1"], ["3", "0", "0", "1", "1"],
+                          ["Total", "1", "1", "2", "4"]])
+        self.assertIn("Budgets used: search 4 of 20, verify 4 of 60, reverify 0 of 10.", md)
+
+    def test_finish_rejects_edited_accounting_and_accepts_unchanged(self):
+        r = self.repo()
+        r.begin()
+        self.full_discovery(r)
+        md = r.ok("summary")["markdown"]["accounting"]
+        edited = md.replace("| complete |", "| incomplete |", 1)
+        code, out = r.finish("complete", "2026-10-10 Status: complete\n\n" + edited)
+        self.assertEqual(code, 2)
+        self.assertIn("accounting", " ".join(out["problems"]))
+        r.ok("finish", "--status", "complete", "--report", r.report("2026-10-10 Status: complete\n\n" + md + "\n## Issues\nNone"))
+        with open(os.path.join(r.root, "reports/daily/2026-10-10.md")) as f:
+            self.assertEqual(f.read().count(urf.ACC_BEGIN), 1)
+
+    def test_budget_override_one_time(self):
+        r = self.repo()
+        bad = [{"budgets": {"search": 40}}, {"budgets": {"search": 40}, "authorization": "approved for 2026-10-09"},
+               {"budgets": {"bogus": 1}, "authorization": self.AUTH}, {"budgets": {"search": -1}, "authorization": self.AUTH},
+               {"budgets": {}, "authorization": self.AUTH}]
+        for bo in bad:
+            code, out = r.run("begin", "--now", "2026-10-10T10:00:00Z", "--config", r.jfile("cfg", cfg(budget_override=bo)))
+            self.assertEqual(code, 3, out)
+        self.assertFalse(os.path.exists(os.path.join(r.root, ".urf")))
+        out = r.begin(c=cfg(budget_override={"budgets": {"search": 26}, "authorization": self.AUTH}))
+        self.assertEqual(out["budgets"]["search"], 26)
+        for i in range(22):
+            r.record(op(NEW, PER, Q1, status="incomplete"))  # extra requests beyond the base budget of 20
+        self.full_discovery(r)
+        code, _ = r.run("record", "--file", r.jfile("op", op(NEW, PER, Q1, status="incomplete")))
+        self.assertEqual(code, 2)  # the override is still a hard limit
+        md = r.ok("summary")["markdown"]["accounting"]
+        self.assertIn("Budget override (one-time, maintainer-authorized for this run): search 20 → 26.", md)
+        self.assertIn(self.AUTH, md)
+        r.ok("finish", "--status", "complete", "--report", r.report("2026-10-10 Status: complete"))
+        r.commit("run")
+        out = r.begin(now="2026-10-11T10:00:00Z")  # next run: base budgets again
+        self.assertEqual(out["budgets"]["search"], 20)
+        r.ok("discard")
+        code, _ = r.run("begin", "--now", "2026-10-11T10:00:00Z", "--config",
+                        r.jfile("cfg", cfg(budget_override={"budgets": {"search": 26}, "authorization": self.AUTH})))
+        self.assertEqual(code, 3)  # an authorization for another date is never reused
+
+    def test_staging_from_older_utility_still_summarizes(self):
+        r = self.repo()
+        r.begin()
+        self.full_discovery(r)
+        wp = os.path.join(r.root, ".urf", "run", "work.json")
+        with open(wp) as f:
+            w = json.load(f)
+        for o in w["ops"]:
+            for k in ("classes", "new_ids", "kind"):
+                o.pop(k)
+        with open(wp, "w") as f:
+            json.dump(w, f)
+        md = r.ok("summary")["markdown"]["accounting"]
+        self.assertIn("| — |", md)
+        r.ok("finish", "--status", "complete", "--report", r.report("2026-10-10 Status: complete"))
+
+
 # ------------------------------------------------------------------ repair and generic profile
 
 class RepairTests(Base):
