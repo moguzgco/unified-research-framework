@@ -31,11 +31,13 @@ Config file:
   "methods": { "github.com/search-new": { "config": "depth=30 forks=exclude", "operations": ["topic:x", "topic:y"] } } }
 ```
 
+`push_available` states truthfully whether the run can push (`true` or `false`). `publication_mode` is `automatic` (the default: push access required) or `manual-supervised`, which also needs `maintainer_authorization`, the maintainer's explicit authorization text naming the run's execution date (`YYYY-MM-DD`). It is for supervised runs only, never unattended ones (`RESEARCH-CONTRACT.md` section 5): `finish` then requires the report to state that publication is pending maintainer push, and its output lists the files as `written_locally` with `remote_publication` pending, not as published. Send no email.
+
 Take budgets, window and methods from `PROJECT.md` and the framework defaults (project overrides win); `baseline_budgets` applies only to baseline runs; omit `reverify_interval_days` to use the framework value. `methods` lists the enabled discovery methods with their shared config string and operations (the exact query text, or `owner/repo` for a list).
 
 `--now` is the run start time; its UTC date is the execution date and the last complete day is the day before. The plan gives the run type, the baseline window, each method's search periods (baseline sub-periods oldest first), operations reusable from a valid checkpoint, budgets, counts and warnings.
 
-`begin` stops (exit 3) without changing anything when: push access is unavailable; `state.json` cannot be parsed or fails validation; `state.json` or `reports/` have uncommitted changes; published files from `finish` are not yet committed (it names them); or staging exists that cannot be resumed (another UTC date, changed published state, changed configuration). Same-date staging with unchanged state and configuration is resumed. After a committed publication, staging is cleaned up (a failed run's staging is moved to `.urf/preserved/`).
+`begin` stops (exit 3) without changing anything when: push access is unavailable in `automatic` mode, `push_available` is not a boolean, `publication_mode` is unsupported, or `manual-supervised` lacks an authorization naming the execution date; `state.json` cannot be parsed or fails validation; `state.json` or `reports/` have uncommitted changes; published files from `finish` are not yet committed (it names them); or staging exists that cannot be resumed (another UTC date, changed published state, changed configuration). Same-date staging with unchanged state and configuration is resumed. After a committed publication, staging is cleaned up (a failed run's staging is moved to `.urf/preserved/`).
 
 ### record
 

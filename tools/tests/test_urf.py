@@ -642,6 +642,64 @@ class LifecycleRunTests(Base):
         self.assertEqual(s["derived_status"], "failed")  # nothing searched yet
 
 
+# ------------------------------------------------------------------ publication mode
+
+class PublicationModeTests(Base):
+    AUTH = "Maintainer authorizes a supervised manual-push run on 2026-10-10."
+
+    def manual(self, **kw):
+        c = cfg(push_available=False, publication_mode="manual-supervised", maintainer_authorization=self.AUTH)
+        c.update(kw)
+        return c
+
+    def begin_code(self, r, c):
+        return r.run("begin", "--now", "2026-10-10T10:00:00Z", "--config", r.jfile("cfg", c))
+
+    def test_automatic_unchanged(self):
+        r = self.repo()
+        self.assertEqual(self.begin_code(r, cfg(push_available=False))[0], 3)
+        self.assertEqual(self.begin_code(r, cfg(publication_mode="automatic", push_available=False))[0], 3)
+        r.begin()
+        self.full_discovery(r)
+        out = r.ok("finish", "--status", "complete", "--report", r.report("2026-10-10 Status: complete"))
+        self.assertEqual(set(out), {"published", "status", "commit"})  # output unchanged
+
+    def test_manual_supervised_accepted_and_recorded(self):
+        r = self.repo()
+        code, out = self.begin_code(r, self.manual())
+        self.assertEqual(code, 0, out)
+        with open(os.path.join(r.root, ".urf", "run", "manifest.json")) as f:
+            self.assertEqual(json.load(f)["publication_mode"], "manual-supervised")
+
+    def test_manual_supervised_needs_authorization_for_this_date(self):
+        r = self.repo()
+        for c in (self.manual(maintainer_authorization=None), self.manual(maintainer_authorization=""),
+                  self.manual(maintainer_authorization="authorized for 2026-10-09")):
+            code, out = self.begin_code(r, c)
+            self.assertEqual(code, 3, out)
+            self.assertIn("maintainer_authorization", out["error"])
+        self.assertFalse(os.path.exists(os.path.join(r.root, ".urf")))
+
+    def test_unsupported_mode_and_non_boolean_push(self):
+        r = self.repo()
+        for c in (cfg(publication_mode="manual"), cfg(publication_mode="unattended-manual"), cfg(push_available="yes")):
+            self.assertEqual(self.begin_code(r, c)[0], 3)
+
+    def test_manual_report_and_finish_output(self):
+        r = self.repo()
+        self.assertEqual(self.begin_code(r, self.manual())[0], 0)
+        self.full_discovery(r)
+        code, out = r.finish("complete", "2026-10-10 Status: complete")
+        self.assertEqual(code, 2)
+        self.assertIn("pending maintainer push", " ".join(out["problems"]))
+        out = r.ok("finish", "--status", "complete", "--report",
+                   r.report("2026-10-10 Status: complete. Publication: pending maintainer push."))
+        self.assertNotIn("published", out)
+        self.assertEqual(out["written_locally"], ["reports/daily/2026-10-10.md", "state.json"])
+        self.assertIn("pending maintainer push", out["remote_publication"])
+        self.assertEqual(r.state()["sources"][NEW]["covered_through"], "2026-10-09")  # coverage rules unchanged
+
+
 # ------------------------------------------------------------------ repair and generic profile
 
 class RepairTests(Base):
