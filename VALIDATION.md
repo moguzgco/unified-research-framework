@@ -60,6 +60,9 @@ Required before enabling a schedule for a new framework or project, and after pr
 - [ ] A run stopped before `finish` publishes nothing; `begin` on the same UTC date resumes it, and on a later date stops and leaves `.urf/run/` untouched.
 - [ ] After `finish`, `begin` stops until the published `state.json` and report are committed together.
 - [ ] The agent never loads the whole `state.json`; the report's Unverified leads section lists only this run's leads and counts for the rest.
+- [ ] The report carries the generated run accounting unchanged (per-operation counts, verification by slot and category, discovery gaps); an edited copy is rejected by `finish`.
+- [ ] A complete operation that did not read its full result space opens a discovery gap without changing `covered_through`; a gap persists across runs, is worked within the search budget, never blocks `finish`, and closes only when every part is examined.
+- [ ] Two entries with different known identifiers are never merged; a deferred lead is not queued before its reconsideration date and keeps its first-seen date and category.
 
 ## Review
 

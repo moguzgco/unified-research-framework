@@ -73,6 +73,8 @@ A finding is verified as the framework requires; anything else is an unverified 
 
 The execution contract defines report files, sections and classifications. In every report, each item lists its ID, title, source link(s), relevant dates, a short evidence summary and its classification. Empty sections say "None".
 
+**Corrections.** Committed reports are never edited. When a run finds that an earlier report stated something inaccurate, its own report has a `Corrections` section naming each affected report, the inaccurate statement and the corrected fact with its evidence.
+
 ## 7. Failures and validation
 
 - **Run status** — unless the execution contract defines it otherwise: `complete` when every operation the run required completed; `partial` when at least one completed and others did not; `failed` when none completed or a fatal error occurred. A fatal error is one that prevents the run from continuing, for example unreadable research state or a lost tool.

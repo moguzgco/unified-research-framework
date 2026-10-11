@@ -1,8 +1,11 @@
 {
   "_comment": "Machine-readable parameters of this framework for tools/urf.py. Keep them consistent with framework/FRAMEWORK.md. Keys starting with _ are ignored.",
   "profile_version": 1,
-  "id": { "prefix": "<id prefix, e.g. host/>", "lowercase": true, "pattern": "<regular expression every ID matches>" },
+  "id": { "prefix": "<id prefix, e.g. host/>", "lowercase": true, "pattern": "<regular expression every ID matches>",
+          "_collision": "Optional, with identity.strict_secondary_key: template for the ID of an entry whose derived ID is held by an entry with another secondary key, using {id} and {sk}. The pattern must accept it. Without it such a candidate cannot be added.",
+          "collision": null },
   "secondary_key": "<field holding a stable source identifier, or null>",
+  "identity": { "_strict_secondary_key": "true: two different known secondary keys are always two entries; a name or derived ID never merges them.", "strict_secondary_key": false },
   "top_level": [],
   "rejected_ids": false,
   "item_required": ["<framework item fields required for a verified item>"],
@@ -15,12 +18,15 @@
     "<coverage key>": {
       "baseline": "month | window | recency",
       "_completion": "Checks a recorded operation must pass to count as complete: [field, '==' or '>=', value | '$field' | {'min': ['$a', '$b']}]. Reaching a depth limit is never completion on its own.",
-      "completion": [["incomplete_results", "==", false]]
+      "completion": [["incomplete_results", "==", false]],
+      "_exhaustive": "Optional: checks that an operation read its full result space, e.g. [['items_read', '>=', '$total_count']]. A complete operation that fails them opens a discovery gap. Omit to never record gaps.",
+      "exhaustive": []
     }
   },
   "queue": {
     "order": ["category", "first_seen", "name_ci"],
     "reserve": { "fraction": 0.25, "round": "up", "order": ["first_seen", "category", "name_ci"] }
   },
-  "reverify_interval_days": 30
+  "reverify_interval_days": 30,
+  "defer": { "_reconsider_days": "Days a deferred lead waits before it is queued again; omit to require an explicit until.", "reconsider_days": 30 }
 }

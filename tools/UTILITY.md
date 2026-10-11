@@ -13,7 +13,7 @@ Run from the project root: `python3 -I framework/tools/urf.py <command> …`. In
 | `apply --file <file>` | Apply a batch of change operations, all or nothing. |
 | `queue --n <N>` | Leads to verify now, and items due for re-verification. |
 | `show --id <ID> [--id …]` | Records of specific entries. |
-| `summary` | Counts, derived status and Markdown for the Coverage, State changes and Unverified leads sections. |
+| `summary` | Counts, derived status and Markdown for the Coverage, State changes and Unverified leads sections, and the generated run accounting. |
 | `finish --status complete\|partial\|failed --report <file> [--fatal <reason>]` | Validate and publish `state.json` and the report. |
 | `validate [--published]` | Check invariants without writing. |
 | `discard` | Maintainer only: move unusable staging to `.urf/preserved/`. |
@@ -33,9 +33,11 @@ Config file:
 
 `push_available` states truthfully whether the run can push (`true` or `false`). `publication_mode` is `automatic` (the default: push access required) or `manual-supervised`, which also needs `maintainer_authorization`, the maintainer's explicit authorization text naming the run's execution date (`YYYY-MM-DD`). It is for supervised runs only, never unattended ones (`RESEARCH-CONTRACT.md` section 5): `finish` then requires the report to state that publication is pending maintainer push, and its output lists the files as `written_locally` with `remote_publication` pending, not as published. Send no email.
 
+`budget_override` (optional) raises or lowers named budgets for this run only: `{ "budgets": { "search": 40 }, "authorization": "<maintainer's text naming the execution date>" }`. `begin` refuses it (exit 3) without an authorization naming the run's execution date, or when it names an unknown budget or a value that is not a non-negative integer. The manifest records the base and overridden budgets and the authorization; the next run uses its own configuration again. The override stays a hard limit.
+
 Take budgets, window and methods from `PROJECT.md` and the framework defaults (project overrides win); `baseline_budgets` applies only to baseline runs; omit `reverify_interval_days` to use the framework value. `methods` lists the enabled discovery methods with their shared config string and operations (the exact query text, or `owner/repo` for a list).
 
-`--now` is the run start time; its UTC date is the execution date and the last complete day is the day before. The plan gives the run type, the baseline window, each method's search periods (baseline sub-periods oldest first), operations reusable from a valid checkpoint, budgets, counts and warnings.
+`--now` is the run start time; its UTC date is the execution date and the last complete day is the day before. The plan gives the open discovery gaps (`gaps`: method, period, query, opening date, open parts and those that must be split, oldest first), the run type, the baseline window, each method's search periods (baseline sub-periods oldest first), operations reusable from a valid checkpoint, budgets, counts and warnings.
 
 `begin` stops (exit 3) without changing anything when: push access is unavailable in `automatic` mode, `push_available` is not a boolean, `publication_mode` is unsupported, or `manual-supervised` lacks an authorization naming the execution date; `state.json` cannot be parsed or fails validation; `state.json` or `reports/` have uncommitted changes; published files from `finish` are not yet committed (it names them); or staging exists that cannot be resumed (another UTC date, changed published state, changed configuration). Same-date staging with unchanged state and configuration is resumed. After a committed publication, staging is cleaned up (a failed run's staging is moved to `.urf/preserved/`).
 
@@ -49,9 +51,13 @@ Take budgets, window and methods from `PROJECT.md` and the framework defaults (p
   "candidates": [ { "name": "owner/repo", "repo_id": 123, "archived": false } ] }
 ```
 
+A part of an open discovery gap is recorded the same way with `"part": "<label>"` (the gap's method, period and query, and the part's metrics): only declared `open` parts are recorded; with a `complete` status that passes the completion checks the part becomes `closed` when the profile's `exhaustive` checks pass, otherwise `split_required`. Gap parts count against the search budget and appear in the accounting as kind `gap`. When a configured operation is `complete` but fails the method's `exhaustive` checks, `record` opens a gap for it (`gap_opened`); coverage is unaffected.
+
 `status` is `complete`, `incomplete` or `unattempted`. The fields after `requests` are those the profile's completion checks name for the method; a `complete` status that fails a check is recorded as `incomplete` with the reasons. `requests` counts against the search budget. To reuse an operation from the plan's `reusable` list: `{"method": …, "period": …, "op": …, "reuse": true}`, adding `"confirmed": true` when the plan marks it `needs_confirmation` (a legacy report: confirm it records the operation as complete).
 
-Returns counts per class (`new`, `item`, `historical`, `rejected`, `pending`, `dup_in_run`) and, in full, only: `new` candidates; recorded items whose visible indicators or name changed (`changed_items`); historical entries seen again; pending leads that gained an identifier or name (`enrich`).
+The classification counts and the IDs of new candidates are kept with the operation record in staging; the run accounting is generated from them. Returns counts per class (`new`, `item`, `historical`, `rejected`, `pending`, `dup_in_run`, and `conflict` when one occurs) and, in full, only: `new` candidates; recorded items whose visible indicators or name changed (`changed_items`); historical entries seen again; pending leads that gained an identifier or name (`enrich`); identity conflicts (`conflicts`, with the kinds of entry holding the ID and the profile's `collision_id`); deferred leads seen again under their own secondary key (`due`), which become due now (logged as `lead.due`).
+
+**Identity.** Candidates match recorded entries by secondary key first, then by ID. With `identity.strict_secondary_key` in the profile, an entry and a candidate whose secondary keys are both known and differ never match, for any kind of entry and within the run: the candidate is a `conflict`. Without it, only rejected entries follow that rule (earlier behavior).
 
 ### apply
 
@@ -59,35 +65,37 @@ A JSON list of operations. The batch is checked against every invariant before a
 
 | Operation | Fields | Effect |
 |---|---|---|
-| `lead.add` | `name`, secondary key, `category`, `method`, `period`, optional `extra` | New pending lead, first seen on the execution date; refused if the ID or secondary key is already known. |
-| `lead.enrich` | `id`, `set` (secondary key and/or `name`) | Keeps first-seen date, method and period. |
+| `lead.add` | `name`, secondary key, `category`, `method`, `period` (a planned period, or the period of a gap part recorded in this run), optional `extra`, optional `id` | New pending lead, first seen on the execution date; refused if the ID or secondary key is already known. For an identity conflict (strict profiles) it takes the profile's collision ID (an explicit `id` must equal it), or is refused when the profile defines none. |
+| `lead.enrich` | `id`, `set` (secondary key and/or `name`) | Keeps first-seen date, method and period. With a strict profile a known secondary key is never replaced. |
 | `lead.accept` | `id`, `item` (framework fields, allowed relevance) | Item added; counts one verification. |
 | `lead.reject` | `id`, `relevance` (a rejection label), `reason` | Moved to `rejected_ids`; counts one verification. |
 | `lead.fail` | `id`, `reason` | Temporary failure: stays pending, not retried this run; counts one verification. |
+| `lead.defer` | `id`, `reason`, `evidence`, optional `until` | Deferred (for example unavailable): stays pending with its identity, first-seen date and category, plus `deferred` (`since`, `until`, `reason`, `evidence`, `count`); counts one verification; not queued again until `until` (default: execution date plus the profile's `defer.reconsider_days`). Deferring again increments `count`. Only due leads can be verified or deferred. |
 | `lead.resolve` | `id`, `matched`, `reason` | Removes a lead that duplicates a recorded entry. |
 | `lead.drop` | `id`, `reason` | Removes a lead; the reason goes in the report. |
 | `screen.drop` | `name` or `id`, `reason` | Screening drop, for the report only. |
+| `gap.split` | `method`, `period`, `query`, `part`, `into` (two or more new labels), `rule` | Splits an `open` or `split_required` part of a gap into `open` parts; the framework's `rule` makes them a partition. |
 | `item.observe` | `id` | Repeated observation (`last_seen`). |
 | `item.verify` | `id`, `set`, `fingerprint`, `material`, `changes` | Re-verification; counts one re-verification. |
 | `item.rename` | `id`, `new_name` | Old name added to `aliases`; the ID never changes. |
 | `item.deactivate` | `id`, `reason` | Moved to `historical_ids` with its identity fields. |
 | `item.reactivate` | `id`, `item` | Back to `items` on verified evidence. |
 
-Results for accepted and rejected leads include the lead's `discovery_period`, used to classify New versus First observation. Repairs (`--repair`, no run in progress, each with a `reason`): `source.set_coverage`, `baseline.set_window`, `item.add_alias`, `lead.resolve`.
+Results for accepted and rejected leads include the lead's `discovery_period`, used to classify New versus First observation. Repairs (`--repair`, no run in progress, each with a `reason`): `source.set_coverage`, `baseline.set_window`, `item.add_alias`, `lead.resolve`, and `lead.defer` (with explicit `since` and `until`; uses no verification slot), `source.add_gap` (`method`, `period` within the source's coverage, `query`, `opened`, `report`, `evidence`: a gap from an earlier run, with its root part `split_required`), and `rejected.reinstate` (`id`, `lead`: the lead's original fields, including `first_seen`, `category`, `method`, `period` and the stored secondary key), which moves a wrongly rejected entry back to `pending_leads` with its original first-seen date and category, so it is verified again in its deterministic queue position.
 
 ### queue, show, summary
 
-`queue --n N` returns at most `N` leads, limited by the remaining verification budget: the reserve (the profile's fraction of `N`, rounded up, oldest first) and then the normal order; leads already attempted in the run are excluded. It also lists items due for re-verification, oldest `last_verified` first, limited by the remaining re-verification budget, with the total due.
+`queue --n N` returns at most `N` leads, limited by the remaining verification budget: the reserve (the profile's fraction of `N`, rounded up, oldest first) and then the normal order; leads already attempted in the run, and deferred leads before their `until` date, are excluded; a due deferred lead takes its normal place by its original first-seen date and category. The slot (`reserve` or `normal`) of every lead it returns is kept in staging (the first assignment wins); verification outcomes record it with the lead's category and first-seen date. It also lists items due for re-verification, oldest `last_verified` first, limited by the remaining re-verification budget, with the total due.
 
-`summary` returns the coverage each method would reach, the derived run status, counters, the IDs the report must list, and Markdown: a coverage table with every operation's status, the state changes, and the Unverified leads section (leads added this run, temporary failures this run, and backlog counts by category and first-seen date).
+`summary` returns the coverage each method would reach, the derived run status, counters, the IDs the report must list, and Markdown: a coverage table with every operation's status, the state changes, and the Unverified leads section (leads added this run, temporary failures, deferrals and leads made due by discovery this run, leads still deferred with their dates, and backlog counts by category and first-seen date). `markdown.accounting` is the run accounting the report must carry unchanged: budgets used and any override, search requests by operation kind, a per-operation table (total, read, requests, candidates, new leads added, dropped and not handled, already pending, recorded items, historical, previously rejected, duplicates in the run, not already recorded) and verification outcomes by slot and by category, and the discovery gaps (opened, advanced, closed or unchanged, parts closed, open parts). It is generated only from the persisted records of `record`, `queue` and `apply`, between `<!-- urf-accounting:begin -->` and `<!-- urf-accounting:end -->`.
 
 ### finish
 
-Checks that the requested status matches the operation outcomes (`failed` for partial outcomes needs `--fatal <reason>`); that the report states the execution date, `Status: <status>`, any fatal reason and every ID acted on in the run; and every invariant. It appends a machine-readable `urf-ops` block to the report, then writes the report (`reports/daily/<date>.md`, or the next free suffix) and `state.json`, and prints the commit command. A failed run publishes the report and `last_run` only. Commit both files together. If publication was interrupted, run `finish` again.
+Checks that the requested status matches the operation outcomes (`failed` for partial outcomes needs `--fatal <reason>`); that the report states the execution date, `Status: <status>`, any fatal reason and every ID acted on in the run; and every invariant. It regenerates the run accounting: a report that carries the block must carry it unchanged (otherwise the report is rejected; run `summary` again after the last change); a report without it gets it appended. It appends a machine-readable `urf-ops` block to the report, then writes the report (`reports/daily/<date>.md`, or the next free suffix) and `state.json`, and prints the commit command. A failed run publishes the report and `last_run` only. Commit both files together. If publication was interrupted, run `finish` again.
 
 ## Invariants
 
-IDs follow the profile pattern and are unique across items, historical entries, rejected entries and pending leads, by ID and by secondary key; historical entries keep their identity fields; items are `active`; no item, historical entry or rejected entry disappears, and no lead disappears without an operation; the baseline window never changes once fixed; coverage only advances, only over contiguous periods whose every configured operation completed (or was reused from a valid checkpoint), and never beyond the last complete day (the execution date for recency-based methods); checkpoints name only completed operations; budgets are respected; only declared top-level keys exist.
+IDs follow the profile pattern and are unique across items, historical entries, rejected entries and pending leads, by ID and by secondary key (with a strict profile, an ID is never shared by two entries with different secondary keys); historical entries keep their identity fields; items are `active`; no item, historical entry or rejected entry disappears, and no lead disappears without an operation; the baseline window never changes once fixed; coverage only advances, only over contiguous periods whose every configured operation completed (or was reused from a valid checkpoint), and never beyond the last complete day (the execution date for recency-based methods); checkpoints name only completed operations; discovery gaps are well formed, never change coverage and are never removed while open; budgets are respected; only declared top-level keys exist.
 
 ## Known limitation
 

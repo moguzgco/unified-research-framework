@@ -36,6 +36,8 @@ Changing sources never erases history: disabled sources stop discovery; newly en
 
 **Open issue — inputs added after coverage (audit L-4, unresolved).** Coverage records that the operations configured when a period was checked completed. A discovery input (for example a query or curated list) added later has not been run over periods already covered, and nothing yet records or discloses that. Until this is resolved, a source's coverage must not be taken as historical coverage for inputs added after its periods were checked.
 
+**Discovery gaps.** Coverage records that the configured operations completed; it does not mean every matching result was read. When a framework defines exhaustiveness for a method and a complete operation did not read its full result space, a **discovery gap** is recorded in the source entry (`gaps`). A gap is worked in later runs within the search budget, after the configured operations, by examining parts of its result space defined by the framework; a part too large to read in full is split further. A gap closes only when every part has been examined in full. Gaps never change `covered_through`, never lower the run status and never prevent publication; leads found in a gap keep the gap's period. Reports state configured-operation completion and open gaps separately.
+
 **Coverage rule.** At the end of a run, advance a source's `covered_through` only to the end of the contiguous period, starting at its current coverage, that this run fully checked. A failed source or a failed run advances nothing. A period counts as fully checked only when every operation it requires has completed, in this run or through a valid checkpoint (section 4); a checkpoint itself never advances coverage.
 
 ## 4. state.json
@@ -60,11 +62,12 @@ Frameworks declare their additional fields, including any top-level fields, in t
 - `baseline.window` — absolute `from` and `to` dates, fixed at the first baseline run.
 - `sources` — one entry per effective source or discovery method: `from`, `covered_through`, `last_status`, and optionally `checkpoint`. Entries of disabled sources are kept.
   - `last_status` — result of the most recent run that worked the source: `complete` (every required operation for the periods worked completed), `partial` (some completed; others incomplete or unattempted) or `failed` (none completed). A source not worked in a run keeps its value.
+  - `gaps` — optional: open discovery gaps (section 3), each with its period, operation, opening date, report, evidence and parts (`*` is the whole result space; each part is `open`, `split_required`, `split` with children, or `closed`). Removed when closed; never removed while open.
   - `checkpoint` — optional, defined by the framework: compact progress within the first period not yet covered (for example completed operations, a cursor or a last ID). It never advances `covered_through`. A later run reuses it only under the framework's validity conditions and otherwise repeats the work. Remove it when that period becomes covered or the checkpoint is invalid.
 - `historical_ids` — inactive items keyed by ID, each with `inactive_since`, `fingerprint`, `report` and the framework's identity fields (for example a host's numeric ID, the name and aliases), so a renamed or reappearing item is still recognised. Never removed.
 - **Inactive items.** An item moves from `items` to `historical_ids` when the framework's inactivity criterion is verified; if the framework defines none, items stay active. Report the move under State changes.
 - **Reappearance.** When a candidate's ID is in `historical_ids`, verify it and compare its evidence and fingerprint with the stored record, and with its report if needed. Classify it by the framework's criteria as a repeated observation or a material change. Move it back to `items` only when verified evidence shows it active again by the framework's criteria.
-- `pending_leads` — unverified candidates to retry, each with the date first seen and the framework's lead fields. A lead may come from a period that is not yet covered (a partial run), provided that period lies within the baseline window or the run's search period. Match candidates to existing leads by stable identifier first, then by name; when an identifier becomes available for a name-only lead, add it to that lead and keep its first-seen date and origin. Leads stay until verified, resolved as a duplicate of a recorded entry, or dropped with a reason stated in the report; they are never dropped to reduce size or context.
+- `pending_leads` — unverified candidates to retry, each with the date first seen and the framework's lead fields. A lead may come from a period that is not yet covered (a partial run), provided that period lies within the baseline window or the run's search period. Match candidates to existing leads by stable identifier first, then by name; when an identifier becomes available for a name-only lead, add it to that lead and keep its first-seen date and origin. Two different known stable identifiers are never one entry: when a framework declares its identifier authoritative, a candidate whose name maps to an entry with another identifier is an identity conflict, never a match, and gets the framework's collision ID or is not added. Leads stay until verified, resolved as a duplicate of a recorded entry, or dropped with a reason stated in the report; they are never dropped to reduce size or context. A lead that cannot be verified for a lasting reason the framework defines (for example, its source is unavailable) is **deferred**, not dropped: it keeps its identity, first-seen date and category, records the reason and evidence, and is not queued again until its reconsideration date, or earlier when discovery sees it again under its own identifier; then it takes its normal queue position.
 
 ## 5. Workflow
 
@@ -76,7 +79,7 @@ Steps marked *common* are defined in common section 5.
 4. Screen the candidates `record` returns as new or changed against scope and relevance (*common*); add leads and screening drops with `apply`.
 5. Take the leads to verify, and the items due for re-verification, from `queue`. Verify them against original sources (*common*); analyze relevance and extract the framework's target fields (*common*).
 6. Compare with previous observations and classify each item (section 6), using the framework's identity and change rules; handle reappearing historical IDs as in section 4. Record every outcome with `apply`.
-7. Write the daily report (section 6), using `summary` for the Coverage, State changes and Unverified leads sections.
+7. Write the daily report (section 6), using `summary` for the Coverage, State changes and Unverified leads sections, and its generated run accounting (per-operation counts and verification by slot and category), unchanged. The agent never reconstructs these counts; `finish` appends the accounting if it is missing and rejects an edited copy.
 8. On the configured synthesis day, write the periodic report from the period's daily reports.
 9. Run `finish`, which validates (common section 7 and section 7 below) and publishes `state.json` and the report together. Commit both in one commit and push; confirm the push succeeded.
 10. If email is configured and a delivery tool is available, send it (common section 8).
@@ -114,6 +117,8 @@ Effective sources and, for each, checked / partial / failed and the window cover
 ```
 
 Items verified, added, changed, dropped or attempted in this run are listed individually and each follows common section 6. Repeated observations screened without verification, and leads carried over unchanged from earlier runs, are reported as counts (per method, and per category and first-seen date for leads); every pending lead remains in `state.json`. Periodic reports synthesize daily reports only, link each finding to its daily report and original source, and add no unverified claims.
+
+A budget above the configured value applies only under a one-time maintainer authorization naming the execution date (`budget_override`, `UTILITY.md`); the report states it.
 
 ## 7. Failures and validation
 

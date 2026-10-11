@@ -23,7 +23,14 @@ RUN_REPORT = "@run-report"
 STAGING = os.path.join(".urf", "run")
 PRESERVED = os.path.join(".urf", "preserved")
 OPS_RE = re.compile(r"<!-- urf-ops\n(.*?)\n-->", re.S)
-REPAIR_OPS = {"source.set_coverage", "baseline.set_window", "item.add_alias", "lead.resolve"}
+ACC_BEGIN, ACC_END = "<!-- urf-accounting:begin -->", "<!-- urf-accounting:end -->"
+ACC_RE = re.compile(re.escape(ACC_BEGIN) + r".*?" + re.escape(ACC_END), re.S)
+OUTCOMES = ("lead.accept", "lead.reject", "lead.fail", "lead.defer")
+REPAIR_OPS = {"source.set_coverage", "baseline.set_window", "item.add_alias", "lead.resolve", "rejected.reinstate",
+              "lead.defer", "source.add_gap"}
+ROOT = "*"
+PART_STATUS = ("open", "split_required", "split", "closed")
+RUN_AND_REPAIR = {"lead.resolve", "lead.defer"}
 
 
 class Fail(Exception):
@@ -132,6 +139,9 @@ class Ident:
     def __init__(self, profile):
         self.p = profile
         self.sk = profile.get("secondary_key")
+        # strict: two different known secondary keys are two different entries, never one
+        self.strict = bool(self.sk) and bool((profile.get("identity") or {}).get("strict_secondary_key"))
+        self.collision = profile["id"].get("collision")
 
     def derive(self, name):
         cfg = self.p["id"]
@@ -154,16 +164,39 @@ class Ident:
         return idx
 
     @staticmethod
-    def match(idx, kind, cid, sk):
+    def match(idx, kind, cid, sk, strict=False):
         """Secondary key first, then ID. A rejected entry matches by ID only when
-        either secondary key is unknown (framework rule); other kinds always do,
-        because one ID can never name two entries."""
+        either secondary key is unknown (framework rule); with a strict profile the
+        same holds for every kind. Otherwise other kinds always match by ID."""
         ids, sks = idx[kind]
         if sk is not None and sk in sks:
             return sks[sk]
-        if cid in ids and (kind != "rejected" or sk is None or ids[cid] is None):
+        if cid in ids and (sk is None or ids[cid] is None or (kind != "rejected" and not strict)):
             return cid
         return None
+
+    def find(self, idx, kind, cid, sk):
+        return Ident.match(idx, kind, cid, sk, self.strict)
+
+    def conflicts(self, idx, cid, sk):
+        """Entries holding this ID with a different known secondary key (strict profiles)."""
+        if not self.strict or sk is None:
+            return []
+        return [(k, cid) for k in ("item", "historical", "rejected", "pending")
+                if cid in idx[k][0] and idx[k][0][cid] is not None and idx[k][0][cid] != sk]
+
+    def collision_id(self, cid, sk):
+        if not self.collision:
+            return None
+        return self.collision.replace("{id}", cid).replace("{sk}", str(sk))
+
+    def own_id(self, key, name, sk, aliases=()):
+        """True when key is the derived ID of the name or an alias, or its collision form."""
+        for n in [name] + list(aliases):
+            d = self.derive(n)
+            if key == d or (sk is not None and key == self.collision_id(d, sk)):
+                return True
+        return False
 
 
 # ---------------------------------------------------------------- validation
@@ -213,6 +246,8 @@ def validate(st, P, root, base=None, ctx=None):
                     E.append(f"sources.{m}.covered_through {ct} beyond {limit} (C1)")
         if s.get("last_status") not in (None, "complete", "partial", "failed"):
             E.append(f"sources.{m}.last_status invalid")
+        if "gaps" in s:
+            E += gap_errors(m, s["gaps"], root)
         cp = s.get("checkpoint")
         if cp is not None:
             if set(cp) != {"period", "config", "done", "report"} or not isinstance(cp["done"], list):
@@ -223,6 +258,12 @@ def validate(st, P, root, base=None, ctx=None):
             b = base["sources"].get(m)
             if b and b.get("covered_through") and (ct is None or D(ct) < D(b["covered_through"])):
                 E.append(f"sources.{m}.covered_through decreased (C1)")
+        if base:
+            now = {(g.get("period"), g.get("op")) for g in s.get("gaps", []) if isinstance(g, dict)}
+            for g in (base["sources"].get(m) or {}).get("gaps", []):
+                k = (g["period"], g["op"])
+                if k not in now and [m, *k] not in ctx.get("closed_gaps", []):
+                    E.append(f"sources.{m}: gap {g['op']!r} {g['period']} removed while still open")
     if bl.get("status") == "complete":
         for m, s in st["sources"].items():
             if s.get("from") == win.get("from") and (s.get("covered_through") is None or D(s["covered_through"]) < D(win["to"])):
@@ -243,10 +284,8 @@ def validate(st, P, root, base=None, ctx=None):
         if rep and rep != RUN_REPORT and not os.path.exists(os.path.join(root, rep)):
             E.append(f"item {k}: report missing {rep}")
         name = v.get("name")
-        if name and I.derive(name) != k:
-            aliases = [I.derive(a) for a in v.get("aliases", [])]
-            if k not in aliases:
-                W.append(f"item {k}: current name {name} differs from the ID and the old name is not in aliases")
+        if name and not I.own_id(k, name, v.get(I.sk) if I.sk else None, v.get("aliases", [])):
+            W.append(f"item {k}: current name {name} differs from the ID and the old name is not in aliases")
     keep = P.get("historical_keep", [])
     for k, v in st["historical_ids"].items():
         if not pat.match(k):
@@ -267,6 +306,8 @@ def validate(st, P, root, base=None, ctx=None):
             E.append(f"lead {l.get('name')}: missing {', '.join(miss)}")
             continue
         lid, sk = I.lead_id(l), l.get(I.sk)
+        if "deferred" in l:
+            E += [f"lead {lid}: {e}" for e in deferred_errors(l["deferred"])]
         if lid in seen_ids or (sk is not None and sk in seen_sk):
             E.append(f"duplicate pending lead {lid}")
         seen_ids.add(lid)
@@ -276,11 +317,17 @@ def validate(st, P, root, base=None, ctx=None):
     for l in st["pending_leads"]:
         lid, sk = I.lead_id(l), l.get(I.sk)
         for kind in ("item", "historical", "rejected"):
-            hit = Ident.match(idx, kind, lid, sk)
+            hit = I.find(idx, kind, lid, sk)
             if hit:
                 E.append(f"pending lead {lid} is also a {kind} entry ({hit})")
+            elif I.strict and lid in idx[kind][0]:
+                E.append(f"pending lead {lid} reuses the ID of a {kind} entry with another {I.sk}")
     for k in set(st["items"]) & set(st["historical_ids"]):
         E.append(f"{k} is both active and historical")
+    if I.strict:
+        for a, b in (("item", "rejected"), ("historical", "rejected")):
+            for k in set(idx[a][0]) & set(idx[b][0]):
+                E.append(f"{k} is both a {a} and a {b} entry")
     owners = {}
     for kind in ("item", "historical", "rejected"):
         for s, i in idx[kind][1].items():
@@ -296,7 +343,7 @@ def validate(st, P, root, base=None, ctx=None):
             if k not in st["items"] and k not in st["historical_ids"]:
                 E.append(f"item {k} removed")
         for k in base.get("rejected_ids", {}):
-            if k not in st.get("rejected_ids", {}):
+            if k not in st.get("rejected_ids", {}) and k not in ctx.get("reinstated", []):
                 E.append(f"rejected entry {k} removed")
         bw = base["baseline"].get("window", {})
         if bw.get("from") and bw != win and not ctx.get("repair"):
@@ -312,6 +359,79 @@ def validate(st, P, root, base=None, ctx=None):
             if used > ctx["budgets"].get(k, math.inf):
                 E.append(f"{k} budget exceeded: {used} > {ctx['budgets'][k]}")
     return E, W
+
+
+def gap_open(g):
+    return any(p["status"] in ("open", "split_required") for p in g["parts"].values())
+
+
+def find_gap(st, meth, per, op):
+    for g in (st["sources"].get(meth) or {}).get("gaps", []):
+        if g["period"] == per and g["op"] == op:
+            return g
+    return None
+
+
+def gap_errors(m, gaps, root):
+    """Structure of sources.<m>.gaps: each gap a result space of one operation over a period,
+    partitioned into parts (labels decided by the framework); open until every leaf is closed."""
+    E, keys = [], set()
+    if not isinstance(gaps, list):
+        return [f"sources.{m}.gaps must be a list"]
+    for g in gaps:
+        tag = f"sources.{m}.gaps {g.get('op')!r} {g.get('period')}"
+        if not isinstance(g, dict) or not {"period", "op", "opened", "report", "parts"} <= set(g) \
+                or set(g) - {"period", "op", "opened", "report", "parts", "evidence", "closed"}:
+            E.append(f"{tag}: malformed")
+            continue
+        if (g["period"], g["op"]) in keys:
+            E.append(f"{tag}: duplicate gap")
+        keys.add((g["period"], g["op"]))
+        a, _, b = str(g["period"]).partition("..")
+        if not (is_date(a) and is_date(b)) or D(b) < D(a) or not is_date(g["opened"]):
+            E.append(f"{tag}: period or opened date invalid")
+        if g["report"] != RUN_REPORT and not os.path.exists(os.path.join(root, g["report"])):
+            E.append(f"{tag}: report missing {g['report']}")
+        parts = g["parts"]
+        if not isinstance(parts, dict) or ROOT not in parts:
+            E.append(f"{tag}: parts must include the root part {ROOT!r}")
+            continue
+        for label, pt in parts.items():
+            if not isinstance(pt, dict) or pt.get("status") not in PART_STATUS:
+                E.append(f"{tag}: part {label!r} status invalid")
+                continue
+            kids = pt.get("children", [])
+            if (pt["status"] == "split") != bool(kids):
+                E.append(f"{tag}: part {label!r} must have children exactly when split")
+            for k in kids:
+                if parts.get(k, {}).get("parent") != label:
+                    E.append(f"{tag}: child {k!r} of {label!r} missing or not linked")
+            par = pt.get("parent")
+            if label != ROOT and (par not in parts or label not in parts[par].get("children", [])):
+                E.append(f"{tag}: part {label!r} has no valid parent")
+        if not gap_open(g) and "closed" not in g:
+            E.append(f"{tag}: every part is closed; a closed gap is removed")
+    return E
+
+
+def deferred_errors(d):
+    if not isinstance(d, dict) or set(d) != {"since", "until", "reason", "evidence", "count"}:
+        return ["deferred must have since, until, reason, evidence, count"]
+    E = []
+    if not (is_date(d["since"]) and is_date(d["until"])) or D(d["until"]) < D(d["since"]):
+        E.append("deferred since/until invalid")
+    if not (isinstance(d["reason"], str) and d["reason"].strip()):
+        E.append("deferred reason missing")
+    if not d["evidence"] or not isinstance(d["evidence"], (str, list)):
+        E.append("deferred evidence missing")
+    if not isinstance(d["count"], int) or isinstance(d["count"], bool) or d["count"] < 1:
+        E.append("deferred count invalid")
+    return E
+
+
+def is_due(lead, run_date):
+    d = lead.get("deferred")
+    return not d or D(d["until"]) <= D(run_date)
 
 
 # ---------------------------------------------------------------- project context
@@ -464,14 +584,21 @@ def cmd_begin(pr, a):
         raise Fail(3, "published state.json fails validation; repair it before a run", errors=E)
     plan = make_plan(st, cfg, pr.P, run_date, lcd)
     checkpoint_reuse(pr, st, plan)
+    plan["gaps"] = [{"method": meth, "period": g["period"], "op": g["op"], "opened": g["opened"],
+                     "open_parts": sorted(k for k, v in g["parts"].items() if v["status"] in ("open", "split_required")),
+                     "split_required": sorted(k for k, v in g["parts"].items() if v["status"] == "split_required")}
+                    for meth, src in sorted(st["sources"].items()) for g in src.get("gaps", [])]
+    plan["gaps"].sort(key=lambda x: (x["opened"], x["method"], x["period"], x["op"]))
     budgets = dict(cfg["budgets"])
     if plan["type"] == "baseline" and cfg.get("baseline_budgets"):
         budgets.update(cfg["baseline_budgets"])
+    override = budget_override(cfg, run_date, budgets)
     interval = cfg.get("reverify_interval_days", pr.P.get("reverify_interval_days"))
     manifest = {"run_date": run_date.isoformat(), "lcd": lcd.isoformat(), "started_at": now.isoformat(),
                 "phase": "staged", "base_sha": sha(raw.encode("utf-8")), "config_sha": pr.config_sha(cfg),
                 "format": detect_format(raw), "budgets": budgets, "reverify_interval_days": interval,
-                "plan": plan, "targets": None, "status": None, "publication_mode": mode}
+                "plan": plan, "targets": None, "status": None, "publication_mode": mode,
+                "budget_override": override}
     work = {"state": st, "base": st, "ops": [], "seen_ids": [], "seen_sk": [], "log": [], "attempted": [],
             "reverified": [], "counters": {"search": 0, "verify": 0, "reverify": 0}}
     os.makedirs(pr.stage, exist_ok=True)
@@ -480,6 +607,8 @@ def cmd_begin(pr, a):
     warnings = note.get("warnings", []) + W
     if nops > budgets["search"]:
         warnings.append(f"search budget {budgets['search']} is below one pass of {nops} configured operations; coverage cannot complete in this run")
+    if plan["gaps"]:
+        warnings.append(f"{len(plan['gaps'])} open discovery gap(s): work them within the search budget left after the configured operations")
     return {"resumed": False, "run_date": manifest["run_date"], "lcd": manifest["lcd"], "plan": plan,
             "budgets": budgets, "warnings": warnings, "counts": counts(st, pr.P, run_date, interval)}
 
@@ -500,6 +629,24 @@ def publication_mode(cfg, run_date):
     else:
         raise Fail(3, f"unsupported publication_mode {mode!r}")
     return mode
+
+
+def budget_override(cfg, run_date, budgets):
+    """One-time budget override for this run only, authorized by the maintainer
+    for its execution date. Updates budgets in place; returns the record or None."""
+    bo = cfg.get("budget_override")
+    if bo is None:
+        return None
+    auth = bo.get("authorization") if isinstance(bo, dict) else None
+    if not isinstance(auth, str) or run_date.isoformat() not in auth:
+        raise Fail(3, "budget_override needs an authorization naming this run's execution date")
+    new = bo.get("budgets")
+    if not isinstance(new, dict) or not new or any(
+            k not in budgets or not isinstance(v, int) or isinstance(v, bool) or v < 0 for k, v in new.items()):
+        raise Fail(3, "budget_override.budgets must set existing budgets to non-negative integers")
+    base = dict(budgets)
+    budgets.update(new)
+    return {"base": base, "budgets": dict(new), "authorization": auth}
 
 
 def counts(st, P, run_date, interval):
@@ -563,6 +710,8 @@ def cmd_record(pr, a):
     w = pr.work()
     rec = read_json(a.file)
     meth, per, op = rec["method"], rec["period"], rec["op"]
+    if "part" in rec:
+        return record_part(pr, m, w, rec)
     pm = m["plan"]["methods"].get(meth)
     if not pm or per not in pm["periods"] or op not in pm["operations"]:
         raise Fail(2, f"{meth} {per} {op} is not a planned operation")
@@ -592,13 +741,79 @@ def cmd_record(pr, a):
         if reasons:
             status = "incomplete"
     w["counters"]["search"] += requests
-    classes, out = classify(pr, w, rec.get("candidates", []))
+    classes, out = classify(pr, w, rec.get("candidates", []), m["run_date"])
+    for lid in out["due"]:
+        w["log"].append({"op": "lead.due", "id": lid, "reason": f"seen in discovery ({meth} {per} {op})"})
+    if not out["due"]:
+        del out["due"]
     metrics = {k: v for k, v in rec.items() if k not in ("candidates", "method", "period", "op", "status")}
+    new_ids = [c.get("id") or pr.I.derive(c["name"]) for c in out["new"]]
+    new_ids += [x["collision_id"] or x["seen_as"] for x in out["conflicts"]]
     w["ops"].append({"method": meth, "period": per, "op": op, "status": status, "reasons": reasons, **metrics,
-                     "candidates": len(rec.get("candidates", []))})
+                     "candidates": len(rec.get("candidates", [])), "classes": classes, "new_ids": new_ids,
+                     "kind": "configured"})
+    if status == "complete" and not exhaustive(pr.P, meth, rec) and not find_gap(w["state"], meth, per, op):
+        src = w["state"]["sources"].setdefault(meth, {"from": pm["from"], "covered_through": None, "last_status": None})
+        src.setdefault("gaps", []).append({
+            "period": per, "op": op, "opened": m["run_date"], "report": RUN_REPORT,
+            "evidence": {k: rec.get(k) for k in ("total_count", "items_read")},
+            "parts": {ROOT: {"status": "split_required"}}})
+        out["gap_opened"] = {"method": meth, "period": per, "op": op}
     pr.save(work=w)
     return {"status": status, "reasons": reasons, "classes": classes, **out,
             "search_used": w["counters"]["search"]}
+
+
+def exhaustive(P, meth, rec):
+    """True unless the profile's exhaustiveness checks for the method fail (no checks: never a gap)."""
+    return all(check(c, rec)[0] for c in P["methods"].get(meth, {}).get("exhaustive", []))
+
+
+def record_part(pr, m, w, rec):
+    """Record one examined part of an open discovery gap."""
+    meth, per, op, label = rec["method"], rec["period"], rec["op"], rec["part"]
+    g = find_gap(w["state"], meth, per, op)
+    if g is None:
+        raise Fail(2, f"no open gap for {meth} {per} {op}")
+    pt = g["parts"].get(label)
+    if pt is None:
+        raise Fail(2, f"gap part {label!r} is not declared; declare parts with gap.split")
+    if pt["status"] != "open":
+        raise Fail(2, f"gap part {label!r} is {pt['status']}; only open parts are recorded")
+    status, reasons = rec.get("status"), []
+    if status not in ("complete", "incomplete", "unattempted"):
+        raise Fail(2, "status must be complete, incomplete or unattempted")
+    requests = int(rec.get("requests", 0))
+    if w["counters"]["search"] + requests > m["budgets"]["search"]:
+        raise Fail(2, f"search budget {m['budgets']['search']} would be exceeded; stop discovery")
+    if status == "complete":
+        for chk in pr.P["methods"][meth].get("completion", []):
+            ok, why = check(chk, rec)
+            if not ok:
+                reasons.append(why)
+        if reasons:
+            status = "incomplete"
+    w["counters"]["search"] += requests
+    classes, out = classify(pr, w, rec.get("candidates", []), m["run_date"])
+    for lid in out.get("due", []):
+        w["log"].append({"op": "lead.due", "id": lid, "reason": f"seen in discovery ({meth} {per} {op} [{label}])"})
+    if not out.get("due"):
+        out.pop("due", None)
+    if status == "complete":
+        pt["status"] = "closed" if exhaustive(pr.P, meth, rec) else "split_required"
+        pt.update({k: rec[k] for k in ("total_count", "items_read") if k in rec})
+        pt["examined"] = m["run_date"]
+    if not gap_open(g):
+        g["closed"] = m["run_date"]
+    metrics = {k: v for k, v in rec.items() if k not in ("candidates", "method", "period", "op", "status", "part")}
+    new_ids = [c.get("id") or pr.I.derive(c["name"]) for c in out["new"]]
+    new_ids += [x["collision_id"] or x["seen_as"] for x in out["conflicts"]]
+    w["ops"].append({"method": meth, "period": per, "op": op, "part": label, "status": status, "reasons": reasons,
+                     **metrics, "candidates": len(rec.get("candidates", [])), "classes": classes, "new_ids": new_ids,
+                     "kind": "gap"})
+    pr.save(work=w)
+    return {"status": status, "reasons": reasons, "part_status": pt["status"], "gap_closed": "closed" in g,
+            "classes": classes, **out, "search_used": w["counters"]["search"]}
 
 
 def check(chk, rec):
@@ -618,25 +833,32 @@ def check(chk, rec):
     return good, f"completion check failed: {field} {op} {want} (got {val!r}, expected {target!r})"
 
 
-def classify(pr, w, cands):
+def classify(pr, w, cands, run_date):
     I, st = pr.I, w["state"]
     idx = I.index(st)
-    classes = {k: 0 for k in ("new", "item", "historical", "rejected", "pending", "dup_in_run")}
-    out = {"new": [], "changed_items": [], "historical": [], "enrich": []}
+    classes = {k: 0 for k in ("new", "item", "historical", "rejected", "pending", "dup_in_run", "conflict")}
+    out = {"new": [], "changed_items": [], "historical": [], "enrich": [], "conflicts": [], "due": []}
     seen_ids, seen_sk = set(w["seen_ids"]), set(w["seen_sk"])
     for c in cands:
         cid = c.get("id") or I.derive(c["name"])
         sk = c.get(I.sk)
-        if cid in seen_ids or (sk is not None and sk in seen_sk):
+        dup = (sk is not None and sk in seen_sk) or ((sk is None or not I.strict) and cid in seen_ids)
+        if dup:  # strict profiles never merge two known secondary keys, even within a run
             classes["dup_in_run"] += 1
             continue
         seen_ids.add(cid)
         if sk is not None:
             seen_sk.add(sk)
-        kind = next((k for k in ("item", "historical", "rejected", "pending") if Ident.match(idx, k, cid, sk)), "new")
+        kind = next((k for k in ("item", "historical", "rejected", "pending") if I.find(idx, k, cid, sk)), "new")
+        hit = I.find(idx, kind, cid, sk) if kind != "new" else None
+        clash = I.conflicts(idx, cid, sk) if kind == "new" else []
+        if clash:
+            kind = "conflict"
         classes[kind] += 1
-        hit = Ident.match(idx, kind, cid, sk) if kind != "new" else None
-        if kind == "new":
+        if kind == "conflict":
+            out["conflicts"].append({"candidate": c, "seen_as": cid, "id_held_by": [k for k, _ in clash],
+                                     "collision_id": I.collision_id(cid, sk)})
+        elif kind == "new":
             out["new"].append(c)
         elif kind == "item":
             fp = st["items"][hit].get("fingerprint", {})
@@ -649,8 +871,14 @@ def classify(pr, w, cands):
             out["historical"].append({"id": hit, "seen_as": cid, "candidate": c})
         elif kind == "pending":
             lead = next(l for l in st["pending_leads"] if I.lead_id(l) == hit)
+            d = lead.get("deferred")
+            if d and sk is not None and lead.get(I.sk) == sk and D(d["until"]) > D(run_date):
+                d["until"] = run_date  # seen again under its own identifier: due for reconsideration now
+                out["due"].append(hit)
             if (sk is not None and lead.get(I.sk) is None) or (hit != cid):
                 out["enrich"].append({"id": hit, "candidate": c})
+    if not classes["conflict"]:
+        del classes["conflict"]  # reported only when it occurs; earlier outputs keep their shape
     w["seen_ids"], w["seen_sk"] = sorted(seen_ids), sorted(seen_sk, key=str)
     return classes, out
 
@@ -668,19 +896,34 @@ def apply_change(pr, st, w, ch, run_date, plan, repair):
     I, P, op = pr.I, pr.P, ch.get("op")
     if repair and op not in REPAIR_OPS:
         raise Fail(2, f"{op} is not a repair operation")
-    if not repair and op in REPAIR_OPS - {"lead.resolve"}:
+    if not repair and op in REPAIR_OPS - RUN_AND_REPAIR:
         raise Fail(2, f"{op} is only allowed with --repair")
     log = {"op": op, "id": ch.get("id"), "reason": ch.get("reason")}
     if op == "lead.add":
         meth, per = ch["method"], ch["period"]
-        if per not in plan["methods"].get(meth, {}).get("periods", []):
-            raise Fail(2, f"lead period {per} is not a planned period of {meth}")
-        lid = ch.get("id") or I.derive(ch["name"])
+        gap_pers = {o["period"] for o in w.get("ops", []) if o.get("kind") == "gap" and o["method"] == meth}
+        if per not in plan["methods"].get(meth, {}).get("periods", []) and per not in gap_pers:
+            raise Fail(2, f"lead period {per} is not a planned period of {meth} or of a gap part recorded in this run")
+        derived = I.derive(ch["name"])
+        lid = ch.get("id") or derived
         sk = ch.get(I.sk)
         idx = I.index(st)
         for kind in ("item", "historical", "rejected", "pending"):
-            if Ident.match(idx, kind, lid, sk):
+            if I.find(idx, kind, lid, sk) or I.find(idx, kind, derived, sk):
                 raise Fail(2, f"lead {lid} already exists as {kind}")
+        clash = I.conflicts(idx, derived, sk)
+        if clash:
+            cid = I.collision_id(derived, sk)
+            if cid is None:
+                raise Fail(2, f"identity conflict: {derived} is held by a {clash[0][0]} entry with another {I.sk}; "
+                              "the profile defines no collision ID, so the candidate cannot be added")
+            if ch.get("id") not in (None, cid):
+                raise Fail(2, f"identity conflict: use the collision ID {cid}")
+            if any(cid in idx[k][0] for k in idx):
+                raise Fail(2, f"collision ID {cid} is already in use")
+            lid = cid
+        elif ch.get("id") not in (None, derived):
+            raise Fail(2, f"lead ID {ch['id']} is not the derived ID {derived}")
         lead = {"id": lid, "name": ch["name"], "first_seen": run_date, "category": ch["category"],
                 "method": meth, "period": per}
         if I.sk:
@@ -694,12 +937,18 @@ def apply_change(pr, st, w, ch, run_date, plan, repair):
         for k, v in ch["set"].items():
             if k not in (I.sk, "name"):
                 raise Fail(2, "lead.enrich may set only the secondary key and name")
+            if I.strict and k == I.sk and lead.get(k) is not None and lead[k] != v:
+                raise Fail(2, f"lead {ch['id']} has {I.sk} {lead[k]}; another {I.sk} is another entry, not an enrichment")
             lead[k] = v
     elif op in ("lead.accept", "lead.reject", "lead.fail"):
         n, lead = find_lead(I, st, ch["id"])
+        if not is_due(lead, run_date):
+            raise Fail(2, f"lead {ch['id']} is deferred until {lead['deferred']['until']}")
         if ch["id"] in w["attempted"]:
             raise Fail(2, f"lead {ch['id']} was already attempted in this run")
         w["attempted"].append(ch["id"])
+        log.update(category=lead.get("category"), first_seen=lead.get("first_seen"),
+                   slot=w.get("slots", {}).get(ch["id"], "unqueued"))
         w["counters"]["verify"] += 1
         if op == "lead.fail":
             log["temporary"] = True
@@ -723,6 +972,36 @@ def apply_change(pr, st, w, ch, run_date, plan, repair):
                 if P.get("rejected_ids"):
                     st.setdefault("rejected_ids", {})[ch["id"]] = ch.get(I.sk, lead.get(I.sk)) if I.sk else None
         log["discovery_period"] = lead["period"]
+    elif op == "lead.defer":
+        n, lead = find_lead(I, st, ch["id"])
+        if not ch.get("reason") or not ch.get("evidence"):
+            raise Fail(2, "lead.defer needs a reason and evidence")
+        if repair:
+            since, until = ch.get("since"), ch.get("until")
+            if not (is_date(since) and is_date(until)) or D(until) <= D(since):
+                raise Fail(2, "a repair deferral needs explicit since and until dates, until after since")
+        else:
+            if ch["id"] in w["attempted"]:
+                raise Fail(2, f"lead {ch['id']} was already attempted in this run")
+            if not is_due(lead, run_date):
+                raise Fail(2, f"lead {ch['id']} is deferred until {lead['deferred']['until']}")
+            w["attempted"].append(ch["id"])
+            w["counters"]["verify"] += 1
+            log.update(category=lead.get("category"), first_seen=lead.get("first_seen"),
+                       slot=w.get("slots", {}).get(ch["id"], "unqueued"))
+            since = run_date
+            days = (P.get("defer") or {}).get("reconsider_days")
+            until = ch.get("until")
+            if until is None and days:
+                until = (D(run_date) + dt.timedelta(days=days)).isoformat()
+            if until is None:
+                raise Fail(2, "the profile defines no defer.reconsider_days; give until")
+            if D(until) <= D(run_date):
+                raise Fail(2, "until must be after the execution date")
+        prev = lead.get("deferred") or {}
+        lead["deferred"] = {"since": since, "until": until, "reason": ch["reason"], "evidence": ch["evidence"],
+                            "count": prev.get("count", 0) + 1}
+        log.update(until=until, count=lead["deferred"]["count"])
     elif op in ("lead.resolve", "lead.drop"):
         if not ch.get("reason"):
             raise Fail(2, f"{op} needs a reason")
@@ -776,6 +1055,53 @@ def apply_change(pr, st, w, ch, run_date, plan, repair):
         item.update({"first_seen": item.get("first_seen", old.get("inactive_since")), "last_seen": run_date,
                      "last_verified": run_date, "status": "active", "report": RUN_REPORT})
         st["items"][ch["id"]] = item
+    elif op == "rejected.reinstate":
+        rej = st.get("rejected_ids", {})
+        if ch["id"] not in rej:
+            raise Fail(2, f"no rejected entry {ch['id']}")
+        new = dict(ch["lead"])
+        if I.sk and rej[ch["id"]] is not None and new.get(I.sk) != rej[ch["id"]]:
+            raise Fail(2, f"reinstated lead must keep {I.sk} {rej[ch['id']]}")
+        if not is_date(new.get("first_seen")):
+            raise Fail(2, "reinstated lead needs its original first_seen date")
+        del rej[ch["id"]]
+        new["id"] = ch["id"]
+        st["pending_leads"].append(new)
+    elif op == "gap.split":
+        g = find_gap(st, ch["method"], ch["period"], ch["query"])
+        if g is None:
+            raise Fail(2, f"no open gap for {ch['method']} {ch['period']} {ch['query']}")
+        pt, into = g["parts"].get(ch["part"]), ch.get("into")
+        if pt is None or pt["status"] not in ("open", "split_required"):
+            raise Fail(2, f"part {ch['part']!r} cannot be split")
+        if not isinstance(into, list) or len(into) < 2 or len(set(into)) != len(into) or any(
+                not isinstance(x, str) or not x or x in g["parts"] for x in into):
+            raise Fail(2, "gap.split needs two or more new, distinct part labels")
+        if not ch.get("rule"):
+            raise Fail(2, "gap.split needs the framework rule that makes the parts a partition")
+        pt.update(status="split", children=list(into), rule=ch["rule"])
+        for x in into:
+            g["parts"][x] = {"status": "open", "parent": ch["part"]}
+        log.update(id=None, gap=[ch["method"], ch["period"], ch["query"]], part=ch["part"], into=list(into))
+    elif op == "source.add_gap":
+        src = st["sources"].get(ch["method"])
+        if src is None or not src.get("covered_through"):
+            raise Fail(2, f"no covered source {ch['method']}")
+        a, _, b = str(ch.get("period", "")).partition("..")
+        if not (is_date(a) and is_date(b)) or D(b) < D(a):
+            raise Fail(2, "period invalid")
+        if D(b) > D(src["covered_through"]) or D(a) < D(src["from"]):
+            raise Fail(2, "a gap is added only for a period already covered by the source")
+        if not ch.get("query"):
+            raise Fail(2, "source.add_gap needs the operation's query")
+        if find_gap(st, ch["method"], ch["period"], ch["query"]):
+            raise Fail(2, "gap already recorded")
+        if not ch.get("evidence") or not is_date(ch.get("opened")) or not ch.get("report"):
+            raise Fail(2, "source.add_gap needs evidence, opened and the report that recorded the operation")
+        src.setdefault("gaps", []).append({"period": ch["period"], "op": ch["query"], "opened": ch["opened"],
+                                           "report": ch["report"], "evidence": ch["evidence"],
+                                           "parts": {ROOT: {"status": "split_required"}}})
+        log["id"] = ch["method"]
     elif op == "source.set_coverage":
         st["sources"][ch["method"]]["covered_through"] = ch["covered_through"]
         log["id"] = ch["method"]
@@ -799,7 +1125,8 @@ def cmd_apply(pr, a):
         st, w = copy.deepcopy(base), {"attempted": [], "reverified": [], "counters": {}}
         logs = [apply_change(pr, st, w, ch, None, {"methods": {}}, True) for ch in changes]
         removed = [l["id"] for l in logs if l["op"] == "lead.resolve"]
-        E, W = validate(st, pr.P, pr.root, base, {"repair": True, "removed_leads": removed})
+        reinstated = [l["id"] for l in logs if l["op"] == "rejected.reinstate"]
+        E, W = validate(st, pr.P, pr.root, base, {"repair": True, "removed_leads": removed, "reinstated": reinstated})
         if E:
             raise Fail(2, "repair rejected", errors=E)
         atomic_write(pr.state_path, dump_state(st, detect_format(raw)))
@@ -839,12 +1166,17 @@ def cmd_queue(pr, a):
     st, I, q = w["state"], pr.I, pr.P["queue"]
     left = m["budgets"]["verify"] - w["counters"]["verify"]
     n = max(0, min(a.n, left))
-    pool = [l for l in st["pending_leads"] if I.lead_id(l) not in w["attempted"]]
+    pool = [l for l in st["pending_leads"] if I.lead_id(l) not in w["attempted"] and is_due(l, m["run_date"])]
     rq = q.get("reserve")
     r = min(n, math.ceil(rq["fraction"] * n)) if rq and rq.get("round") == "up" else (min(n, int(rq["fraction"] * n)) if rq else 0)
     reserve = sorted(pool, key=sort_key(rq["order"], I))[:r] if rq else []
     taken = {I.lead_id(l) for l in reserve}
     rest = [l for l in sorted(pool, key=sort_key(q["order"], I)) if I.lead_id(l) not in taken][:n - r]
+    slots = w.setdefault("slots", {})
+    for name, group in (("reserve", reserve), ("normal", rest)):
+        for l in group:
+            slots.setdefault(I.lead_id(l), name)
+    pr.save(work=w)
     interval = dt.timedelta(days=m["reverify_interval_days"])
     rd = D(m["run_date"])
     due = sorted(((v["last_verified"], k) for k, v in st["items"].items()
@@ -880,6 +1212,7 @@ def cmd_show(pr, a):
 def coverage(m, w):
     """Advance coverage only over contiguous fully checked periods; derive run status."""
     plan, st = m["plan"], copy.deepcopy(w["state"])
+    closed_gaps = []
     total = done_n = 0
     result = {}
     for meth, pm in plan["methods"].items():
@@ -896,6 +1229,11 @@ def coverage(m, w):
             elif first_open is None:
                 first_open = (per, sorted(set(complete)))
         src["covered_through"] = covered
+        for g in [g for g in src.get("gaps", []) if "closed" in g]:
+            src["gaps"].remove(g)
+            closed_gaps.append([meth, g["period"], g["op"]])
+        if "gaps" in src and not src["gaps"]:
+            del src["gaps"]
         if first_open and first_open[1]:
             src["checkpoint"] = {"period": first_open[0], "config": pm["config"], "done": first_open[1],
                                  "report": RUN_REPORT}
@@ -912,7 +1250,99 @@ def coverage(m, w):
         bl["status"] = "complete" if all(s["covered_through"] and D(s["covered_through"]) >= D(bl["window"]["to"])
                                          for s in enabled) else "in_progress"
     status = "complete" if done_n == total else ("partial" if done_n else "failed")
+    # sources with gaps but no planned work this run (e.g. only gap parts) keep closing correctly
+    for meth, src in st["sources"].items():
+        if meth in plan["methods"]:
+            continue
+        for g in [g for g in src.get("gaps", []) if "closed" in g]:
+            src["gaps"].remove(g)
+            closed_gaps.append([meth, g["period"], g["op"]])
+        if "gaps" in src and not src["gaps"]:
+            del src["gaps"]
     return st, result, status
+
+
+def closed_gap_keys(w):
+    return [[meth, g["period"], g["op"]] for meth, src in w["state"]["sources"].items()
+            for g in src.get("gaps", []) if "closed" in g]
+
+
+def accounting(m, w):
+    """Required run accounting, generated only from persisted operation records
+    (record, queue, apply). Reports carry it unchanged between the markers."""
+    b, c = m["budgets"], w["counters"]
+    L = [ACC_BEGIN, "### Run accounting (generated by the state utility)", ""]
+    L.append("Budgets used: " + ", ".join(f"{k} {c.get(k, 0)} of {b[k]}" for k in ("search", "verify", "reverify") if k in b) + ".")
+    bo = m.get("budget_override")
+    if bo:
+        L.append("Budget override (one-time, maintainer-authorized for this run): " +
+                 ", ".join(f"{k} {bo['base'].get(k)} → {v}" for k, v in sorted(bo["budgets"].items())) +
+                 f". Authorization: {bo['authorization']}")
+    kinds = {}
+    for o in w["ops"]:
+        kinds[o.get("kind", "configured")] = kinds.get(o.get("kind", "configured"), 0) + int(o.get("requests", 0) or 0)
+    L.append("Search requests by operation kind: " + (", ".join(f"{k} {v}" for k, v in sorted(kinds.items())) or "none") + ".")
+    added = {l["id"] for l in w["log"] if l["op"] == "lead.add"}
+    dropped = {l["id"] for l in w["log"] if l["op"] == "screen.drop"}
+    L += ["", "#### Discovery operations", "",
+          "| Method | Period | Operation | Status | Total | Read | Requests | Candidates | New leads | Dropped | New, not handled | Already pending | Recorded items | Historical | Previously rejected | Duplicates in run | Not already recorded | Identity conflicts |",
+          "|" + "---|" * 18]
+    for o in w["ops"]:
+        cl = o.get("classes")
+        head = [o["method"], o["period"] + (f" [{o['part']}]" if o.get("part") else ""), f"`{o['op']}`", o["status"]]
+        if cl is None:
+            L.append("| " + " | ".join(head + ["—"] * 14) + " |")
+            continue
+        new = set(o.get("new_ids", []))
+        na, nd = len(new & added), len(new & dropped)
+        nums = [o.get("total_count", "—"), o.get("items_read", "—"), o.get("requests", "—"), o.get("candidates", "—"),
+                na, nd, len(new) - na - nd, cl.get("pending", 0), cl.get("item", 0), cl.get("historical", 0),
+                cl.get("rejected", 0), cl.get("dup_in_run", 0), o.get("candidates", 0) - cl.get("dup_in_run", 0) - cl.get("item", 0),
+                cl.get("conflict", 0)]
+        L.append("| " + " | ".join(head + [str(x) for x in nums]) + " |")
+    outs = [l for l in w["log"] if l["op"] in OUTCOMES]
+    cols = [o for o in OUTCOMES]
+    names = {"lead.accept": "Accepted", "lead.reject": "Rejected", "lead.fail": "Temporary failures", "lead.defer": "Deferred"}
+
+    def table(title, key):
+        rows = {}
+        for l in outs:
+            rows.setdefault(l.get(key), {}).setdefault(l["op"], 0)
+            rows[l.get(key)][l["op"]] += 1
+        T = ["", f"#### Verification by {title}", "", f"| {title.capitalize()} | " + " | ".join(names[x] for x in cols) + " | Total |",
+             "|" + "---|" * (len(cols) + 2)]
+        for k in sorted(rows, key=lambda x: (x is None, str(x))):
+            T.append(f"| {k if k is not None else 'unknown'} | " + " | ".join(str(rows[k].get(x, 0)) for x in cols) +
+                     f" | {sum(rows[k].values())} |")
+        T.append("| Total | " + " | ".join(str(sum(1 for l in outs if l['op'] == x)) for x in cols) + f" | {len(outs)} |")
+        return T
+    L += table("slot", "slot") + table("category", "category")
+    L += gap_table(w)
+    L.append(ACC_END)
+    return "\n".join(L)
+
+
+def gap_table(w):
+    """Open and closed discovery gaps: configured operations are complete for coverage,
+    but these result spaces were not read in full."""
+    rows = []
+    base = {(meth, g["period"], g["op"]): g for meth, src in w["base"]["sources"].items() for g in src.get("gaps", [])}
+    now = {(meth, g["period"], g["op"]): g for meth, src in w["state"]["sources"].items() for g in src.get("gaps", [])}
+    for key in sorted(set(base) | set(now)):
+        g = now.get(key) or base[key]
+        leaves = [k for k, v in g["parts"].items() if v["status"] != "split"]
+        done = [k for k in leaves if g["parts"][k]["status"] == "closed"]
+        opened = [k for k in leaves if g["parts"][k]["status"] != "closed"]
+        worked = any(o.get("kind") == "gap" and (o["method"], o["period"], o["op"]) == key for o in w["ops"])
+        state = ("closed this run" if "closed" in g else "opened this run" if key not in base else
+                 "advanced this run" if worked or g != base[key] else "unchanged")
+        rows.append(f"| {key[0]} | {key[1]} | `{key[2]}` | {g['opened']} | {state} | {len(done)} of {len(leaves)} | "
+                    + (", ".join(f"`{x}`" for x in sorted(opened)) or "none") + " |")
+    if not rows:
+        return ["", "#### Discovery gaps", "", "None. Every recorded operation read its full result space."]
+    return ["", "#### Discovery gaps", "",
+            "Coverage counts configured operations as complete; these result spaces were not read in full and stay open until every part is examined.",
+            "", "| Method | Period | Operation | Opened | Status | Parts closed | Open parts |", "|" + "---|" * 7] + rows
 
 
 def acted_ids(w):
@@ -929,6 +1359,9 @@ def cmd_summary(pr, a):
     leads = st["pending_leads"]
     added = [l for l in leads if l["first_seen"] == m["run_date"]]
     failed = by.get("lead.fail", [])
+    deferred_now = {l["id"] for l in by.get("lead.defer", [])}
+    waiting = sorted((l for l in leads if not is_due(l, m["run_date"]) and pr.I.lead_id(l) not in deferred_now),
+                     key=lambda l: (l["deferred"]["until"], pr.I.lead_id(l)))
     backlog = {}
     for l in leads:
         backlog.setdefault(l.get("category"), {}).setdefault(l["first_seen"], 0)
@@ -945,14 +1378,17 @@ def cmd_summary(pr, a):
                 f"All pending leads remain in `state.json`.", "",
                 f"Added this run ({len(added)}): " + (", ".join(f"`{pr.I.lead_id(l)}` (cat. {l.get('category')})" for l in added) or "None"), "",
                 f"Temporary failures this run ({len(failed)}): " + ("; ".join(f"`{l['id']}` — {l.get('reason')}" for l in failed) or "None"), "",
+                f"Deferred this run ({len(by.get('lead.defer', []))}): " + ("; ".join(f"`{l['id']}` until {l['until']} — {l.get('reason')}" for l in by.get("lead.defer", [])) or "None"), "",
+                f"Made due by discovery this run ({len(by.get('lead.due', []))}): " + (", ".join(f"`{l['id']}`" for l in by.get("lead.due", [])) or "None"), "",
+                f"Still deferred ({len(waiting)}): " + (", ".join(f"`{pr.I.lead_id(l)}` until {l['deferred']['until']}" for l in waiting) or "None"), "",
                 "| Category | First seen | Leads |", "|---|---|---|"]
     md_leads += [f"| {c} | {fs} | {n} |" for c in sorted(backlog, key=lambda x: (x is None, x))
                  for fs, n in sorted(backlog[c].items())]
     md_changes = [f"- `{k}`: {len(v)}" for k, v in sorted(by.items())]
     return {"derived_status": status, "type": m["plan"]["type"], "counters": w["counters"], "budgets": m["budgets"],
-            "coverage": cov, "acted_ids": acted_ids(w),
+            "budget_override": m.get("budget_override"), "coverage": cov, "acted_ids": acted_ids(w),
             "markdown": {"coverage": "\n".join(md_cov), "unverified_leads": "\n".join(md_leads),
-                         "state_changes": "\n".join(md_changes) or "None"}}
+                         "state_changes": "\n".join(md_changes) or "None", "accounting": accounting(m, w)}}
 
 
 def cmd_finish(pr, a):
@@ -987,15 +1423,23 @@ def cmd_finish(pr, a):
         if a.status != "failed":
             low = report.lower()
             problems += [f"report does not list {i}" for i in acted_ids(w) if i.lower() not in low]
+        acc = accounting(m, w)
+        found = ACC_RE.search(report)
+        if found and found.group(0) != acc:
+            problems.append("the generated accounting block in the report differs from the persisted records; "
+                            "insert the current `summary` accounting unchanged, or remove it to have it appended")
         if problems:
             raise Fail(2, "report rejected", problems=problems)
+        if not found:
+            report = report.rstrip("\n") + "\n\n" + acc + "\n"
         if not OPS_RE.search(report):
             ops = [{k: o[k] for k in ("method", "period", "op", "status", "evidence") if k in o} for o in w["ops"]]
             report = report.rstrip("\n") + "\n\n<!-- urf-ops\n" + json.dumps({"ops": ops}) + "\n-->\n"
         rel = target.replace(os.sep, "/")
         new_st["last_run"] = {"date": m["run_date"], "type": m["plan"]["type"], "status": a.status, "report": rel}
         ctx = {"run_date": m["run_date"], "lcd": m["lcd"], "budgets": m["budgets"], "counters": w["counters"],
-               "removed_leads": [l["id"] for l in w["log"] if l["op"] in ("lead.accept", "lead.reject", "lead.resolve", "lead.drop")]}
+               "removed_leads": [l["id"] for l in w["log"] if l["op"] in ("lead.accept", "lead.reject", "lead.resolve", "lead.drop")],
+               "closed_gaps": closed_gap_keys(w)}
         if a.status == "failed":
             ctx["removed_leads"] = []
         E, _ = validate(new_st, pr.P, pr.root, w["base"], ctx)
@@ -1032,7 +1476,7 @@ def cmd_validate(pr, a):
         m, w = pr.manifest(), pr.work()
         E, W = validate(w["state"], pr.P, pr.root, w["base"], {"run_date": m["run_date"], "lcd": m["lcd"],
                         "budgets": m["budgets"], "counters": w["counters"],
-                        "removed_leads": [l["id"] for l in w["log"]]})
+                        "removed_leads": [l["id"] for l in w["log"]], "closed_gaps": closed_gap_keys(w)})
     if E:
         raise Fail(2, "validation failed", errors=E, warnings=W)
     return {"valid": True, "warnings": W}

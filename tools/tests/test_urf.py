@@ -700,6 +700,524 @@ class PublicationModeTests(Base):
         self.assertEqual(r.state()["sources"][NEW]["covered_through"], "2026-10-09")  # coverage rules unchanged
 
 
+# ------------------------------------------------------------------ run accounting (stage 1)
+
+def acc_rows(md, header):
+    """Table rows (as cell lists) following a '#### header' line in the accounting block."""
+    lines = md.split("\n")
+    i = lines.index("#### " + header)
+    rows = [l for l in lines[i + 1:] if l.startswith("|")]
+    out = []
+    for l in rows[2:]:
+        out.append([c.strip() for c in l.strip("|").split("|")])
+        if l.startswith("| Total"):
+            break
+    return out
+
+
+class AccountingTests(Base):
+    AUTH = "Maintainer authorizes a one-time budget override for the run on 2026-10-10."
+
+    def test_per_operation_counts_from_records(self):
+        st = incremental_state(items={"github.com/c/z": item("c/z", 3)}, pending_leads=[lead("d/w", 4)],
+                               rejected_ids={"github.com/e/v": 5})
+        r = self.repo(st)
+        r.begin()
+        cands = [{"name": "a/x", "repo_id": 1}, {"name": "b/y", "repo_id": 2}, {"name": "f/u", "repo_id": 6},
+                 {"name": "c/z", "repo_id": 3}, {"name": "d/w", "repo_id": 4}, {"name": "e/v", "repo_id": 5}]
+        r.record(op(NEW, PER, Q1, cands=cands, total_count=40, items_read=30))
+        r.record(op(NEW, PER, Q2, cands=[{"name": "a/x", "repo_id": 1}, {"name": "g/t", "repo_id": 7}]))
+        r.record(op(EST, PER, Q1, cands=[{"name": "c/z", "repo_id": 3}]))
+        r.record(op(EST, PER, Q2))
+        self.assertEqual(r.apply([{"op": "lead.add", "name": "a/x", "repo_id": 1, "category": 1, "method": NEW, "period": PER},
+                                  {"op": "screen.drop", "name": "b/y", "reason": "out of scope"},
+                                  {"op": "lead.add", "name": "g/t", "repo_id": 7, "category": 2, "method": NEW, "period": PER},
+                                  {"op": "item.observe", "id": "github.com/c/z"}])[0], 0)
+        md = r.ok("summary")["markdown"]["accounting"]
+        rows = acc_rows(md, "Discovery operations")
+        # Total, Read, Requests, Candidates, New leads, Dropped, New not handled, Pending, Recorded, Historical, Rejected, Dup, Not recorded
+        self.assertEqual(rows[0][4:], ["40", "30", "1", "6", "1", "1", "1", "1", "1", "0", "1", "0", "5", "0"])
+        self.assertEqual(rows[1][4:], ["2", "2", "1", "2", "1", "0", "0", "0", "0", "0", "0", "1", "1", "0"])
+        self.assertEqual(rows[2][4:], ["1", "1", "1", "1", "0", "0", "0", "0", "0", "0", "0", "1", "0", "0"])  # seen earlier in the run
+        self.assertIn("Search requests by operation kind: configured 4.", md)
+        text = "2026-10-10 Status: complete github.com/a/x github.com/b/y github.com/g/t"
+        r.ok("finish", "--status", "complete", "--report", r.report(text))
+        with open(os.path.join(r.root, "reports/daily/2026-10-10.md")) as f:
+            pub = f.read()
+        self.assertIn(md, pub)  # appended verbatim from persisted records
+        self.assertLess(pub.index(urf.ACC_END), pub.index("<!-- urf-ops"))
+
+    def test_verification_by_slot_and_category(self):
+        leads = [lead("a/old", 1, cat=2, first="2026-09-01"), lead("b/one", 2, cat=1, first="2026-10-01"),
+                 lead("c/two", 3, cat=1, first="2026-10-02"), lead("d/three", 4, cat=3, first="2026-10-03")]
+        r = self.repo(incremental_state(pending_leads=leads))
+        r.begin()
+        self.full_discovery(r)
+        q = r.ok("queue", "--n", "3")
+        self.assertEqual([l["name"] for l in q["reserve"]], ["a/old"])
+        self.assertEqual([l["name"] for l in q["normal"]], ["b/one", "c/two"])
+        r.ok("queue", "--n", "3")  # repeated queue calls keep the first slot assignment
+        out = r.apply([{"op": "lead.accept", "id": "github.com/a/old", "item": item("a/old", 1)},
+                       {"op": "lead.reject", "id": "github.com/b/one", "relevance": "low", "reason": "r"},
+                       {"op": "lead.fail", "id": "github.com/c/two", "reason": "timeout"},
+                       {"op": "lead.fail", "id": "github.com/d/three", "reason": "timeout"}])
+        self.assertEqual(out[0], 0, out)
+        md = r.ok("summary")["markdown"]["accounting"]
+        self.assertEqual(acc_rows(md, "Verification by slot"),
+                         [["normal", "0", "1", "1", "0", "2"], ["reserve", "1", "0", "0", "0", "1"],
+                          ["unqueued", "0", "0", "1", "0", "1"], ["Total", "1", "1", "2", "0", "4"]])
+        self.assertEqual(acc_rows(md, "Verification by category"),
+                         [["1", "0", "1", "1", "0", "2"], ["2", "1", "0", "0", "0", "1"], ["3", "0", "0", "1", "0", "1"],
+                          ["Total", "1", "1", "2", "0", "4"]])
+        self.assertIn("Budgets used: search 4 of 20, verify 4 of 60, reverify 0 of 10.", md)
+
+    def test_finish_rejects_edited_accounting_and_accepts_unchanged(self):
+        r = self.repo()
+        r.begin()
+        self.full_discovery(r)
+        md = r.ok("summary")["markdown"]["accounting"]
+        edited = md.replace("| complete |", "| incomplete |", 1)
+        code, out = r.finish("complete", "2026-10-10 Status: complete\n\n" + edited)
+        self.assertEqual(code, 2)
+        self.assertIn("accounting", " ".join(out["problems"]))
+        r.ok("finish", "--status", "complete", "--report", r.report("2026-10-10 Status: complete\n\n" + md + "\n## Issues\nNone"))
+        with open(os.path.join(r.root, "reports/daily/2026-10-10.md")) as f:
+            self.assertEqual(f.read().count(urf.ACC_BEGIN), 1)
+
+    def test_budget_override_one_time(self):
+        r = self.repo()
+        bad = [{"budgets": {"search": 40}}, {"budgets": {"search": 40}, "authorization": "approved for 2026-10-09"},
+               {"budgets": {"bogus": 1}, "authorization": self.AUTH}, {"budgets": {"search": -1}, "authorization": self.AUTH},
+               {"budgets": {}, "authorization": self.AUTH}]
+        for bo in bad:
+            code, out = r.run("begin", "--now", "2026-10-10T10:00:00Z", "--config", r.jfile("cfg", cfg(budget_override=bo)))
+            self.assertEqual(code, 3, out)
+        self.assertFalse(os.path.exists(os.path.join(r.root, ".urf")))
+        out = r.begin(c=cfg(budget_override={"budgets": {"search": 26}, "authorization": self.AUTH}))
+        self.assertEqual(out["budgets"]["search"], 26)
+        for i in range(22):
+            r.record(op(NEW, PER, Q1, status="incomplete"))  # extra requests beyond the base budget of 20
+        self.full_discovery(r)
+        code, _ = r.run("record", "--file", r.jfile("op", op(NEW, PER, Q1, status="incomplete")))
+        self.assertEqual(code, 2)  # the override is still a hard limit
+        md = r.ok("summary")["markdown"]["accounting"]
+        self.assertIn("Budget override (one-time, maintainer-authorized for this run): search 20 → 26.", md)
+        self.assertIn(self.AUTH, md)
+        r.ok("finish", "--status", "complete", "--report", r.report("2026-10-10 Status: complete"))
+        r.commit("run")
+        out = r.begin(now="2026-10-11T10:00:00Z")  # next run: base budgets again
+        self.assertEqual(out["budgets"]["search"], 20)
+        r.ok("discard")
+        code, _ = r.run("begin", "--now", "2026-10-11T10:00:00Z", "--config",
+                        r.jfile("cfg", cfg(budget_override={"budgets": {"search": 26}, "authorization": self.AUTH})))
+        self.assertEqual(code, 3)  # an authorization for another date is never reused
+
+    def test_staging_from_older_utility_still_summarizes(self):
+        r = self.repo()
+        r.begin()
+        self.full_discovery(r)
+        wp = os.path.join(r.root, ".urf", "run", "work.json")
+        with open(wp) as f:
+            w = json.load(f)
+        for o in w["ops"]:
+            for k in ("classes", "new_ids", "kind"):
+                o.pop(k)
+        with open(wp, "w") as f:
+            json.dump(w, f)
+        md = r.ok("summary")["markdown"]["accounting"]
+        self.assertIn("| — |", md)
+        r.ok("finish", "--status", "complete", "--report", r.report("2026-10-10 Status: complete"))
+
+
+# ------------------------------------------------------------------ identity (stage 2)
+
+def strict_profile(collision=True):
+    with open(PROFILE) as f:
+        prof = json.load(f)
+    prof["identity"] = {"strict_secondary_key": True}
+    prof["id"]["pattern"] = "^github\\.com/[a-z0-9._-]+/[a-z0-9._-]+(#[0-9]+)?$"
+    if collision:
+        prof["id"]["collision"] = "{id}#{sk}"
+    return prof
+
+
+class IdentityTests(Base):
+    def strict_repo(self, state, collision=True):
+        r = self.repo(state)
+        with open(os.path.join(r.root, "framework", "state-profile.json"), "w") as f:
+            json.dump(strict_profile(collision), f)
+        r.commit("strict profile")
+        return r
+
+    def state4(self, **kw):
+        st = incremental_state(items={"github.com/a/x": item("a/x", 1)}, pending_leads=[lead("b/y", 2)],
+                               rejected_ids={"github.com/r/w": 4}, **kw)
+        st["historical_ids"] = {"github.com/h/z": {"inactive_since": "2026-09-20", "fingerprint": {},
+                                                  "report": "reports/daily/2026-09-01.md", "repo_id": 3,
+                                                  "name": "h/z", "aliases": []}}
+        return st
+
+    def test_strict_different_known_ids_conflict_for_every_kind(self):
+        r = self.strict_repo(self.state4())
+        r.begin()
+        cands = [{"name": "A/X"}, {"name": "a/x", "repo_id": 9}, {"name": "b/y", "repo_id": 8}, {"name": "h/z", "repo_id": 7},
+                 {"name": "r/w", "repo_id": 6}, {"name": "moved/y", "repo_id": 2}, {"name": "a/x", "repo_id": 9}]
+        out = r.record(op(NEW, PER, Q1, cands=cands))
+        self.assertEqual(out["classes"], {"new": 0, "item": 1, "historical": 0, "rejected": 0, "pending": 1,
+                                          "dup_in_run": 1, "conflict": 4})
+        self.assertEqual(sorted(c["collision_id"] for c in out["conflicts"]),
+                         ["github.com/a/x#9", "github.com/b/y#8", "github.com/h/z#7", "github.com/r/w#6"])
+        self.assertEqual(out["enrich"][0]["id"], "github.com/b/y")  # same repo_id under a new name: rename
+        md = r.ok("summary")["markdown"]["accounting"]
+        self.assertEqual(acc_rows(md, "Discovery operations")[0][-1], "4")
+
+    def test_conflicting_lead_gets_collision_id_and_is_never_merged(self):
+        r = self.strict_repo(self.state4())
+        r.begin()
+        r.record(op(NEW, PER, Q1, cands=[{"name": "b/y", "repo_id": 8}]))
+        add = {"op": "lead.add", "name": "b/y", "repo_id": 8, "category": 1, "method": NEW, "period": PER}
+        self.assertEqual(r.apply([dict(add, id="github.com/b/y")])[0], 2)  # the derived ID belongs to another repo
+        self.assertEqual(r.apply([add])[0], 0)
+        self.assertEqual(r.apply([add])[0], 2)  # same repo_id is now known
+        sh = r.ok("show", "--id", "github.com/b/y", "--id", "github.com/b/y#8")
+        self.assertEqual((sh["github.com/b/y"]["repo_id"], sh["github.com/b/y#8"]["repo_id"]), (2, 8))
+        self.assertEqual(r.apply([{"op": "lead.accept", "id": "github.com/b/y#8", "item": item("b/y", 8)}])[0], 0)
+        r.record(op(NEW, PER, Q2))
+        r.record(op(EST, PER, Q1))
+        r.record(op(EST, PER, Q2))
+        r.ok("finish", "--status", "complete", "--report", r.report("2026-10-10 Status: complete github.com/b/y#8"))
+        st = r.state()
+        self.assertEqual(st["items"]["github.com/b/y#8"]["repo_id"], 8)
+        self.assertEqual(st["pending_leads"][0]["repo_id"], 2)
+        self.assertEqual(r.ok("validate", "--published")["warnings"], [])  # collision ID is the item's own ID
+
+    def test_conflict_without_collision_rule_is_refused(self):
+        r = self.strict_repo(self.state4(), collision=False)
+        r.begin()
+        code, out = r.apply([{"op": "lead.add", "name": "a/x", "repo_id": 9, "category": 1, "method": NEW, "period": PER}])
+        self.assertEqual(code, 2)
+        self.assertIn("identity conflict", " ".join([out.get("error", "")] + out.get("errors", [])))
+
+    def test_strict_enrich_never_replaces_a_known_id(self):
+        r = self.strict_repo(self.state4())
+        r.begin()
+        self.assertEqual(r.apply([{"op": "lead.enrich", "id": "github.com/b/y", "set": {"repo_id": 5}}])[0], 2)
+        self.assertEqual(r.apply([{"op": "lead.enrich", "id": "github.com/b/y", "set": {"name": "b/y-renamed"}}])[0], 0)
+        self.assertEqual(r.ok("show", "--id", "github.com/b/y")["github.com/b/y"]["name"], "b/y-renamed")
+
+    def test_strict_published_state_rejects_id_reuse(self):
+        st = self.state4()
+        st["pending_leads"].append(dict(lead("a/x", 9)))
+        r = self.strict_repo(st)
+        code, out = r.run("validate", "--published")
+        self.assertEqual(code, 2)
+        self.assertIn("reuses the ID", " ".join(out["errors"]))
+
+    def test_reinstate_rejected_entry(self):
+        st = incremental_state(rejected_ids={"github.com/j/nuee": 77, "github.com/q/other": 78},
+                               pending_leads=[lead("c1/a", 1, cat=1, first="2026-10-11")])
+        r = self.repo(st)
+        good = {"op": "rejected.reinstate", "id": "github.com/j/nuee", "reason": "rejected on maturity; review",
+                "lead": {"name": "j/nuee", "repo_id": 77, "first_seen": "2026-10-11", "category": 1, "method": NEW,
+                         "period": "2026-10-09..2026-10-10"}}
+        for bad in ({k: v for k, v in good.items() if k != "reason"},
+                    dict(good, id="github.com/j/none"),
+                    dict(good, lead=dict(good["lead"], repo_id=99)),
+                    dict(good, lead={k: v for k, v in good["lead"].items() if k != "first_seen"}),
+                    dict(good, lead={k: v for k, v in good["lead"].items() if k != "category"})):
+            self.assertEqual(r.apply([bad], "--repair")[0], 2, bad)
+        self.assertEqual(r.state()["rejected_ids"], st["rejected_ids"])  # nothing written
+        out = r.apply([good], "--repair")
+        self.assertEqual(out[0], 0, out)
+        s = r.state()
+        self.assertEqual(s["rejected_ids"], {"github.com/q/other": 78})
+        self.assertEqual(s["pending_leads"][-1], dict(good["lead"], id="github.com/j/nuee"))
+        r.commit("repair")
+        r.begin(now="2026-10-12T10:00:00Z")
+        q = r.ok("queue", "--n", "2")
+        names = [l["name"] for l in q["reserve"] + q["normal"]]
+        self.assertEqual(names, ["c1/a", "j/nuee"])  # original first_seen and category keep its queue position
+        self.assertEqual(r.apply([dict(good, id="github.com/q/other")])[0], 2)  # repair only, never in a run
+
+
+# ------------------------------------------------------------------ deferred leads (stage 3)
+
+class DeferTests(Base):
+    EV = "page and clone need credentials; repo_id absent from the owner's public repositories"
+
+    def drepo(self, state, strict=False, days=30):
+        r = self.repo(state)
+        prof = strict_profile() if strict else json.load(open(PROFILE))
+        if days:
+            prof["defer"] = {"reconsider_days": days}
+        with open(os.path.join(r.root, "framework", "state-profile.json"), "w") as f:
+            json.dump(prof, f)
+        r.commit("profile")
+        return r
+
+    def finish_all(self, r, ids, date):
+        r.ok("finish", "--status", "complete", "--report", r.report(f"{date} Status: complete " + " ".join(ids)))
+        r.commit("run " + date)
+
+    def test_defer_in_run_skips_queue_until_due_then_keeps_priority(self):
+        leads = [lead("old/gone", 1, cat=2, first="2026-09-01"), lead("c1/a", 2, cat=1, first="2026-10-01"),
+                 lead("c1/b", 3, cat=1, first="2026-10-02")]
+        r = self.drepo(incremental_state(pending_leads=leads))
+        r.begin()
+        self.full_discovery(r)
+        q = r.ok("queue", "--n", "2")
+        self.assertEqual([l["name"] for l in q["reserve"]], ["old/gone"])
+        self.assertEqual(r.apply([{"op": "lead.defer", "id": "github.com/old/gone", "reason": "unavailable"}])[0], 2)
+        out = r.apply([{"op": "lead.defer", "id": "github.com/old/gone", "reason": "unavailable", "evidence": self.EV}])
+        self.assertEqual(out[0], 0, out)
+        self.assertEqual(out[1]["counters"]["verify"], 1)  # the establishing attempt uses one slot
+        md = r.ok("summary")["markdown"]
+        self.assertIn("Deferred this run (1): `github.com/old/gone` until 2026-11-09", md["unverified_leads"])
+        self.assertEqual(acc_rows(md["accounting"], "Verification by slot")[-1], ["Total", "0", "0", "0", "1", "1"])
+        self.finish_all(r, ["github.com/old/gone"], "2026-10-10")
+        d = next(l for l in r.state()["pending_leads"] if l["name"] == "old/gone")
+        self.assertEqual(d["deferred"], {"since": "2026-10-10", "until": "2026-11-09", "reason": "unavailable",
+                                         "evidence": self.EV, "count": 1})
+        self.assertEqual((d["first_seen"], d["category"]), ("2026-09-01", 2))
+        # before the reconsideration date: never queued, not even by the oldest-first reserve
+        r.begin(now="2026-10-11T10:00:00Z")
+        q = r.ok("queue", "--n", "4")
+        self.assertEqual([l["name"] for l in q["reserve"] + q["normal"]], ["c1/a", "c1/b"])
+        self.assertEqual(r.apply([{"op": "lead.fail", "id": "github.com/old/gone", "reason": "x"}])[0], 2)
+        self.assertIn("Still deferred (1): `github.com/old/gone` until 2026-11-09", r.ok("summary")["markdown"]["unverified_leads"])
+        r.ok("discard")
+        # due: back in its deterministic position (oldest first in the reserve)
+        r.begin(now="2026-11-09T10:00:00Z")
+        q = r.ok("queue", "--n", "2")
+        self.assertEqual([l["name"] for l in q["reserve"]], ["old/gone"])
+        r.apply([{"op": "lead.defer", "id": "github.com/old/gone", "reason": "still unavailable", "evidence": self.EV}])
+        d = next(l for l in r.ok("show", "--id", "github.com/old/gone").values())
+        self.assertEqual((d["deferred"]["count"], d["deferred"]["until"]), (2, "2026-12-09"))
+
+    def test_repair_deferral_uses_no_slot_and_needs_dates(self):
+        r = self.drepo(incremental_state(pending_leads=[lead("old/gone", 1)]))
+        base = {"op": "lead.defer", "id": "github.com/old/gone", "reason": "unavailable since 2026-10-03", "evidence": self.EV}
+        for bad in (base, dict(base, since="2026-10-11"), dict(base, since="2026-10-11", until="2026-10-11"),
+                    dict(base, since="2026-10-11", until="2026-11-10", evidence="")):
+            self.assertEqual(r.apply([bad], "--repair")[0], 2, bad)
+        out = r.apply([dict(base, since="2026-10-11", until="2026-11-10")], "--repair")
+        self.assertEqual(out[0], 0, out)
+        d = r.state()["pending_leads"][0]
+        self.assertEqual(d["deferred"]["count"], 1)
+        self.assertEqual(r.ok("validate", "--published")["valid"], True)
+
+    def test_discovery_with_same_identifier_makes_due(self):
+        dl = dict(lead("old/gone", 5), deferred={"since": "2026-10-01", "until": "2026-11-01", "reason": "unavailable",
+                                                 "evidence": self.EV, "count": 1})
+        r = self.drepo(incremental_state(pending_leads=[dl, lead("o/name", 6)]), strict=True)
+        r.begin()
+        out = r.record(op(NEW, PER, Q1, cands=[{"name": "old/gone", "repo_id": 77}]))
+        self.assertEqual(out["classes"]["conflict"], 1)  # same name, another repo: no reactivation
+        self.assertNotIn("due", out)
+        q = r.ok("queue", "--n", "5")
+        self.assertEqual([l["name"] for l in q["reserve"] + q["normal"]], ["o/name"])
+        out = r.record(op(NEW, PER, Q2, cands=[{"name": "renamed/gone", "repo_id": 5}]))
+        self.assertEqual(out["due"], ["github.com/old/gone"])
+        q = r.ok("queue", "--n", "5")
+        self.assertIn("github.com/old/gone", [l["id"] for l in q["reserve"] + q["normal"]])
+        self.assertIn("Made due by discovery this run (1)", r.ok("summary")["markdown"]["unverified_leads"])
+
+    def test_malformed_deferred_block_and_missing_interval(self):
+        bad = dict(lead("old/gone", 5), deferred={"since": "2026-10-01", "until": "2026-09-01", "reason": "",
+                                                  "evidence": [], "count": 0})
+        r = self.drepo(incremental_state(pending_leads=[bad]))
+        code, out = r.run("validate", "--published")
+        self.assertEqual(code, 2)
+        self.assertEqual(len([e for e in out["errors"] if "deferred" in e]), 4)
+        r2 = self.drepo(incremental_state(pending_leads=[lead("a/b", 1)]), days=None)
+        r2.begin()
+        ch = {"op": "lead.defer", "id": "github.com/a/b", "reason": "unavailable", "evidence": self.EV}
+        self.assertEqual(r2.apply([ch])[0], 2)  # no interval in the profile and none given
+        self.assertEqual(r2.apply([dict(ch, until="2026-10-20")])[0], 0)
+
+
+# ------------------------------------------------------------------ discovery gaps (stage 4)
+
+EXH = [["items_read", ">=", "$total_count"]]
+
+
+class GapTests(Base):
+    def grepo(self, state=None):
+        r = self.repo(state or incremental_state())
+        with open(PROFILE) as f:
+            prof = json.load(f)
+        for meth in (NEW, EST):
+            prof["methods"][meth]["exhaustive"] = EXH
+        with open(os.path.join(r.root, "framework", "state-profile.json"), "w") as f:
+            json.dump(prof, f)
+        r.commit("profile with exhaustiveness")
+        return r
+
+    def bounded_run(self, r):
+        r.begin()
+        out = r.record(op(NEW, PER, Q1, total_count=47, items_read=30))
+        self.assertEqual(out["gap_opened"], {"method": NEW, "period": PER, "op": Q1})
+        self.assertNotIn("gap_opened", r.record(op(NEW, PER, Q2, total_count=12, items_read=12)))
+        r.record(op(EST, PER, Q1))
+        r.record(op(EST, PER, Q2))
+        r.ok("finish", "--status", "complete", "--report", r.report("2026-10-10 Status: complete"))
+        r.commit("run 2026-10-10")
+
+    def gsplit(self, r, part, into, rule="per day"):
+        return r.apply([{"op": "gap.split", "method": NEW, "period": PER, "query": Q1, "part": part, "into": into, "rule": rule}])
+
+    def part(self, label, total, read, cands=(), **kw):
+        rec = op(NEW, PER, Q1, total_count=total, items_read=read, cands=cands, **kw)
+        rec["part"] = label
+        return rec
+
+    def test_bounded_operation_opens_gap_and_coverage_is_unchanged(self):
+        r = self.grepo()
+        self.bounded_run(r)
+        st = r.state()
+        self.assertEqual(st["sources"][NEW]["covered_through"], "2026-10-09")  # configured operations complete
+        self.assertEqual(st["sources"][NEW]["gaps"], [{"period": PER, "op": Q1, "opened": "2026-10-10",
+                                                       "report": "reports/daily/2026-10-10.md",
+                                                       "evidence": {"total_count": 47, "items_read": 30},
+                                                       "parts": {"*": {"status": "split_required"}}}])
+        self.assertNotIn("gaps", st["sources"][EST])
+        with open(os.path.join(r.root, "reports/daily/2026-10-10.md")) as f:
+            self.assertIn(f"| {NEW} | {PER} | `{Q1}` | 2026-10-10 | opened this run | 0 of 1 | `*` |", f.read())
+
+    def test_gap_resumes_across_runs_and_closes_only_when_every_part_is_closed(self):
+        r = self.grepo()
+        self.bounded_run(r)
+        out = r.begin(now="2026-10-11T10:00:00Z")
+        self.assertEqual(out["plan"]["gaps"], [{"method": NEW, "period": PER, "op": Q1, "opened": "2026-10-10",
+                                                "open_parts": ["*"], "split_required": ["*"]}])
+        self.assertEqual(self.gsplit(r, "*", ["d1", "d2"])[0], 0)
+        out = r.record(self.part("d1", 20, 20))
+        self.assertEqual((out["part_status"], out["gap_closed"]), ("closed", False))
+        per11 = "2026-10-10..2026-10-10"
+        for m in (NEW, EST):
+            for q in (Q1, Q2):
+                r.record(op(m, per11, q))
+        r.ok("finish", "--status", "complete", "--report", r.report("2026-10-11 Status: complete"))
+        r.commit("run 2026-10-11")
+        g = r.state()["sources"][NEW]["gaps"][0]
+        self.assertEqual({k: v["status"] for k, v in g["parts"].items()}, {"*": "split", "d1": "closed", "d2": "open"})
+        self.assertEqual(r.state()["sources"][NEW]["covered_through"], "2026-10-10")
+        with open(os.path.join(r.root, "reports/daily/2026-10-11.md")) as f:
+            self.assertIn("advanced this run | 1 of 2 | `d2` |", f.read())
+        # third run: a part that is still too large is split again; the gap closes with its last leaf
+        out = r.begin(now="2026-10-12T10:00:00Z")
+        self.assertEqual(out["plan"]["gaps"][0]["open_parts"], ["d2"])
+        self.assertEqual(r.record(self.part("d2", 40, 30))["part_status"], "split_required")
+        self.assertEqual(self.gsplit(r, "d2", ["d2a", "d2b"], rule="halve the day")[0], 0)
+        self.assertFalse(r.record(self.part("d2a", 25, 25))["gap_closed"])
+        self.assertTrue(r.record(self.part("d2b", 15, 15))["gap_closed"])
+        md = r.ok("summary")["markdown"]["accounting"]
+        self.assertIn("closed this run | 3 of 3 | none |", md)  # leaves d1, d2a, d2b
+        self.assertIn("Search requests by operation kind: gap 3.", md)
+        per12 = "2026-10-11..2026-10-11"
+        for m in (NEW, EST):
+            for q in (Q1, Q2):
+                r.record(op(m, per12, q))
+        r.ok("finish", "--status", "complete", "--report", r.report("2026-10-12 Status: complete"))
+        st = r.state()
+        self.assertNotIn("gaps", st["sources"][NEW])
+        self.assertEqual(st["sources"][NEW]["covered_through"], "2026-10-11")
+
+    def test_part_rules(self):
+        r = self.grepo()
+        self.bounded_run(r)
+        r.begin(now="2026-10-11T10:00:00Z")
+        code, _ = r.run("record", "--file", r.jfile("op", self.part("*", 47, 30)))
+        self.assertEqual(code, 2)  # a part that needs splitting is not recorded again
+        code, _ = r.run("record", "--file", r.jfile("op", self.part("d1", 10, 10)))
+        self.assertEqual(code, 2)  # undeclared part
+        for into, rule in ((["only"], "x"), (["*", "x"], "x"), (["a", "a"], "x"), (["a", "b"], "")):
+            self.assertEqual(self.gsplit(r, "*", into, rule=rule)[0], 2, into)
+        self.assertEqual(r.apply([{"op": "gap.split", "method": NEW, "period": PER, "query": Q2, "part": "*",
+                                   "into": ["a", "b"], "rule": "x"}])[0], 2)  # no gap for that operation
+        self.assertEqual(self.gsplit(r, "*", ["a", "b"])[0], 0)
+        self.assertEqual(self.gsplit(r, "*", ["c", "d"])[0], 2)  # already split
+        r.record(self.part("a", 5, 5))
+        code, _ = r.run("record", "--file", r.jfile("op", self.part("a", 5, 5)))
+        self.assertEqual(code, 2)  # a closed part is never recorded again
+        rec = self.part("b", 50, 20, status="complete")
+        self.assertEqual(r.record(rec)["status"], "incomplete")  # completion checks still apply: stays open
+        self.assertEqual(r.ok("show", "--id", "x")["x"]["kind"], "unknown")
+        g = json.load(open(os.path.join(r.root, ".urf", "run", "work.json")))["state"]["sources"][NEW]["gaps"][0]
+        self.assertEqual(g["parts"]["b"]["status"], "open")
+
+    def test_leads_from_a_gap_part_keep_its_period(self):
+        r = self.grepo()
+        self.bounded_run(r)
+        r.begin(now="2026-10-11T10:00:00Z")
+        add = {"op": "lead.add", "name": "late/one", "repo_id": 501, "category": 2, "method": NEW, "period": PER}
+        self.assertEqual(r.apply([add])[0], 2)  # no part of that gap examined yet in this run
+        self.gsplit(r, "*", ["d1", "d2"])
+        out = r.record(self.part("d1", 3, 3, cands=[{"name": "late/one", "repo_id": 501}]))
+        self.assertEqual(out["classes"]["new"], 1)
+        self.assertEqual(r.apply([add])[0], 0)
+        lead_ = r.ok("show", "--id", "github.com/late/one")["github.com/late/one"]
+        self.assertEqual((lead_["first_seen"], lead_["period"]), ("2026-10-11", PER))
+        rows = acc_rows(r.ok("summary")["markdown"]["accounting"], "Discovery operations")
+        self.assertEqual(rows[0][1], PER + " [d1]")
+        self.assertEqual(rows[0][8], "1")  # new lead attributed to the gap part
+
+    def test_budget_exhaustion_leaves_gap_open_without_blocking_finish(self):
+        r = self.grepo()
+        self.bounded_run(r)
+        r.begin(now="2026-10-11T10:00:00Z", c=cfg(budgets={"search": 5, "verify": 60, "reverify": 10}))
+        per11 = "2026-10-10..2026-10-10"
+        for m in (NEW, EST):
+            for q in (Q1, Q2):
+                r.record(op(m, per11, q))
+        self.gsplit(r, "*", ["d1", "d2"])
+        r.record(self.part("d1", 5, 5))
+        code, out = r.run("record", "--file", r.jfile("op", self.part("d2", 5, 5)))
+        self.assertEqual(code, 2)
+        self.assertIn("search budget", out["error"])
+        self.assertEqual(r.ok("summary")["derived_status"], "complete")
+        r.ok("finish", "--status", "complete", "--report", r.report("2026-10-11 Status: complete"))
+        g = r.state()["sources"][NEW]["gaps"][0]
+        self.assertEqual(g["parts"]["d2"]["status"], "open")
+
+    def test_add_gap_repair_discard_and_validation(self):
+        r = self.grepo()
+        good = {"op": "source.add_gap", "method": NEW, "period": "2026-10-01..2026-10-02", "query": Q1,
+                "opened": "2026-10-11", "report": "reports/daily/2026-09-01.md", "reason": "review found a bounded search",
+                "evidence": {"total_count": 56, "items_read": 30}}
+        for bad in ({k: v for k, v in good.items() if k != "evidence"}, dict(good, period="2026-10-08..2026-10-09"),
+                    dict(good, report="reports/daily/none.md"), {k: v for k, v in good.items() if k != "reason"}):
+            self.assertEqual(r.apply([bad], "--repair")[0], 2, bad)
+        out = r.apply([good], "--repair")
+        self.assertEqual(out[0], 0, out)
+        r.commit("repair")
+        self.assertEqual(r.apply([good], "--repair")[0], 2)  # duplicate
+        st = r.state()
+        self.assertEqual(st["sources"][NEW]["covered_through"], "2026-10-08")  # coverage untouched
+        self.assertEqual(st["sources"][NEW]["gaps"][0]["parts"], {"*": {"status": "split_required"}})
+        self.assertEqual(r.ok("validate", "--published")["valid"], True)
+        before = r.raw_state()
+        r.begin()
+        self.assertEqual(r.apply([good])[0], 2)  # repair only
+        r.apply([{"op": "gap.split", "method": NEW, "period": "2026-10-01..2026-10-02", "query": Q1, "part": "*",
+                  "into": ["a", "b"], "rule": "per day"}])
+        r.ok("discard")
+        self.assertEqual(r.raw_state(), before)  # discarded staging leaves published gaps untouched
+        broken = r.state()
+        broken["sources"][NEW]["gaps"][0]["parts"]["orphan"] = {"status": "open", "parent": "nowhere"}
+        r.write("state.json", json.dumps(broken))
+        code, out = r.run("validate", "--published")
+        self.assertEqual(code, 2)
+        self.assertIn("no valid parent", " ".join(out["errors"]))
+
+    def test_profile_without_exhaustiveness_never_opens_gaps(self):
+        r = self.repo()
+        r.begin()
+        self.assertNotIn("gap_opened", r.record(op(NEW, PER, Q1, total_count=500, items_read=30)))
+        md = r.ok("summary")["markdown"]["accounting"]
+        self.assertIn("#### Discovery gaps\n\nNone.", md)
+
+
 # ------------------------------------------------------------------ repair and generic profile
 
 class RepairTests(Base):
