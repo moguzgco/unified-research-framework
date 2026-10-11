@@ -736,9 +736,9 @@ class AccountingTests(Base):
         md = r.ok("summary")["markdown"]["accounting"]
         rows = acc_rows(md, "Discovery operations")
         # Total, Read, Requests, Candidates, New leads, Dropped, New not handled, Pending, Recorded, Historical, Rejected, Dup, Not recorded
-        self.assertEqual(rows[0][4:], ["40", "30", "1", "6", "1", "1", "1", "1", "1", "0", "1", "0", "5"])
-        self.assertEqual(rows[1][4:], ["2", "2", "1", "2", "1", "0", "0", "0", "0", "0", "0", "1", "1"])
-        self.assertEqual(rows[2][4:], ["1", "1", "1", "1", "0", "0", "0", "0", "0", "0", "0", "1", "0"])  # seen earlier in the run
+        self.assertEqual(rows[0][4:], ["40", "30", "1", "6", "1", "1", "1", "1", "1", "0", "1", "0", "5", "0"])
+        self.assertEqual(rows[1][4:], ["2", "2", "1", "2", "1", "0", "0", "0", "0", "0", "0", "1", "1", "0"])
+        self.assertEqual(rows[2][4:], ["1", "1", "1", "1", "0", "0", "0", "0", "0", "0", "0", "1", "0", "0"])  # seen earlier in the run
         self.assertIn("Search requests by operation kind: configured 4.", md)
         text = "2026-10-10 Status: complete github.com/a/x github.com/b/y github.com/g/t"
         r.ok("finish", "--status", "complete", "--report", r.report(text))
@@ -827,6 +827,117 @@ class AccountingTests(Base):
         md = r.ok("summary")["markdown"]["accounting"]
         self.assertIn("| — |", md)
         r.ok("finish", "--status", "complete", "--report", r.report("2026-10-10 Status: complete"))
+
+
+# ------------------------------------------------------------------ identity (stage 2)
+
+def strict_profile(collision=True):
+    with open(PROFILE) as f:
+        prof = json.load(f)
+    prof["identity"] = {"strict_secondary_key": True}
+    prof["id"]["pattern"] = "^github\\.com/[a-z0-9._-]+/[a-z0-9._-]+(#[0-9]+)?$"
+    if collision:
+        prof["id"]["collision"] = "{id}#{sk}"
+    return prof
+
+
+class IdentityTests(Base):
+    def strict_repo(self, state, collision=True):
+        r = self.repo(state)
+        with open(os.path.join(r.root, "framework", "state-profile.json"), "w") as f:
+            json.dump(strict_profile(collision), f)
+        r.commit("strict profile")
+        return r
+
+    def state4(self, **kw):
+        st = incremental_state(items={"github.com/a/x": item("a/x", 1)}, pending_leads=[lead("b/y", 2)],
+                               rejected_ids={"github.com/r/w": 4}, **kw)
+        st["historical_ids"] = {"github.com/h/z": {"inactive_since": "2026-09-20", "fingerprint": {},
+                                                  "report": "reports/daily/2026-09-01.md", "repo_id": 3,
+                                                  "name": "h/z", "aliases": []}}
+        return st
+
+    def test_strict_different_known_ids_conflict_for_every_kind(self):
+        r = self.strict_repo(self.state4())
+        r.begin()
+        cands = [{"name": "A/X"}, {"name": "a/x", "repo_id": 9}, {"name": "b/y", "repo_id": 8}, {"name": "h/z", "repo_id": 7},
+                 {"name": "r/w", "repo_id": 6}, {"name": "moved/y", "repo_id": 2}, {"name": "a/x", "repo_id": 9}]
+        out = r.record(op(NEW, PER, Q1, cands=cands))
+        self.assertEqual(out["classes"], {"new": 0, "item": 1, "historical": 0, "rejected": 0, "pending": 1,
+                                          "dup_in_run": 1, "conflict": 4})
+        self.assertEqual(sorted(c["collision_id"] for c in out["conflicts"]),
+                         ["github.com/a/x#9", "github.com/b/y#8", "github.com/h/z#7", "github.com/r/w#6"])
+        self.assertEqual(out["enrich"][0]["id"], "github.com/b/y")  # same repo_id under a new name: rename
+        md = r.ok("summary")["markdown"]["accounting"]
+        self.assertEqual(acc_rows(md, "Discovery operations")[0][-1], "4")
+
+    def test_conflicting_lead_gets_collision_id_and_is_never_merged(self):
+        r = self.strict_repo(self.state4())
+        r.begin()
+        r.record(op(NEW, PER, Q1, cands=[{"name": "b/y", "repo_id": 8}]))
+        add = {"op": "lead.add", "name": "b/y", "repo_id": 8, "category": 1, "method": NEW, "period": PER}
+        self.assertEqual(r.apply([dict(add, id="github.com/b/y")])[0], 2)  # the derived ID belongs to another repo
+        self.assertEqual(r.apply([add])[0], 0)
+        self.assertEqual(r.apply([add])[0], 2)  # same repo_id is now known
+        sh = r.ok("show", "--id", "github.com/b/y", "--id", "github.com/b/y#8")
+        self.assertEqual((sh["github.com/b/y"]["repo_id"], sh["github.com/b/y#8"]["repo_id"]), (2, 8))
+        self.assertEqual(r.apply([{"op": "lead.accept", "id": "github.com/b/y#8", "item": item("b/y", 8)}])[0], 0)
+        r.record(op(NEW, PER, Q2))
+        r.record(op(EST, PER, Q1))
+        r.record(op(EST, PER, Q2))
+        r.ok("finish", "--status", "complete", "--report", r.report("2026-10-10 Status: complete github.com/b/y#8"))
+        st = r.state()
+        self.assertEqual(st["items"]["github.com/b/y#8"]["repo_id"], 8)
+        self.assertEqual(st["pending_leads"][0]["repo_id"], 2)
+        self.assertEqual(r.ok("validate", "--published")["warnings"], [])  # collision ID is the item's own ID
+
+    def test_conflict_without_collision_rule_is_refused(self):
+        r = self.strict_repo(self.state4(), collision=False)
+        r.begin()
+        code, out = r.apply([{"op": "lead.add", "name": "a/x", "repo_id": 9, "category": 1, "method": NEW, "period": PER}])
+        self.assertEqual(code, 2)
+        self.assertIn("identity conflict", " ".join([out.get("error", "")] + out.get("errors", [])))
+
+    def test_strict_enrich_never_replaces_a_known_id(self):
+        r = self.strict_repo(self.state4())
+        r.begin()
+        self.assertEqual(r.apply([{"op": "lead.enrich", "id": "github.com/b/y", "set": {"repo_id": 5}}])[0], 2)
+        self.assertEqual(r.apply([{"op": "lead.enrich", "id": "github.com/b/y", "set": {"name": "b/y-renamed"}}])[0], 0)
+        self.assertEqual(r.ok("show", "--id", "github.com/b/y")["github.com/b/y"]["name"], "b/y-renamed")
+
+    def test_strict_published_state_rejects_id_reuse(self):
+        st = self.state4()
+        st["pending_leads"].append(dict(lead("a/x", 9)))
+        r = self.strict_repo(st)
+        code, out = r.run("validate", "--published")
+        self.assertEqual(code, 2)
+        self.assertIn("reuses the ID", " ".join(out["errors"]))
+
+    def test_reinstate_rejected_entry(self):
+        st = incremental_state(rejected_ids={"github.com/j/nuee": 77, "github.com/q/other": 78},
+                               pending_leads=[lead("c1/a", 1, cat=1, first="2026-10-11")])
+        r = self.repo(st)
+        good = {"op": "rejected.reinstate", "id": "github.com/j/nuee", "reason": "rejected on maturity; review",
+                "lead": {"name": "j/nuee", "repo_id": 77, "first_seen": "2026-10-11", "category": 1, "method": NEW,
+                         "period": "2026-10-09..2026-10-10"}}
+        for bad in ({k: v for k, v in good.items() if k != "reason"},
+                    dict(good, id="github.com/j/none"),
+                    dict(good, lead=dict(good["lead"], repo_id=99)),
+                    dict(good, lead={k: v for k, v in good["lead"].items() if k != "first_seen"}),
+                    dict(good, lead={k: v for k, v in good["lead"].items() if k != "category"})):
+            self.assertEqual(r.apply([bad], "--repair")[0], 2, bad)
+        self.assertEqual(r.state()["rejected_ids"], st["rejected_ids"])  # nothing written
+        out = r.apply([good], "--repair")
+        self.assertEqual(out[0], 0, out)
+        s = r.state()
+        self.assertEqual(s["rejected_ids"], {"github.com/q/other": 78})
+        self.assertEqual(s["pending_leads"][-1], dict(good["lead"], id="github.com/j/nuee"))
+        r.commit("repair")
+        r.begin(now="2026-10-12T10:00:00Z")
+        q = r.ok("queue", "--n", "2")
+        names = [l["name"] for l in q["reserve"] + q["normal"]]
+        self.assertEqual(names, ["c1/a", "j/nuee"])  # original first_seen and category keep its queue position
+        self.assertEqual(r.apply([dict(good, id="github.com/q/other")])[0], 2)  # repair only, never in a run
 
 
 # ------------------------------------------------------------------ repair and generic profile

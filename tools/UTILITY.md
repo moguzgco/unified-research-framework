@@ -53,7 +53,9 @@ Take budgets, window and methods from `PROJECT.md` and the framework defaults (p
 
 `status` is `complete`, `incomplete` or `unattempted`. The fields after `requests` are those the profile's completion checks name for the method; a `complete` status that fails a check is recorded as `incomplete` with the reasons. `requests` counts against the search budget. To reuse an operation from the plan's `reusable` list: `{"method": …, "period": …, "op": …, "reuse": true}`, adding `"confirmed": true` when the plan marks it `needs_confirmation` (a legacy report: confirm it records the operation as complete).
 
-The classification counts and the IDs of new candidates are kept with the operation record in staging; the run accounting is generated from them. Returns counts per class (`new`, `item`, `historical`, `rejected`, `pending`, `dup_in_run`) and, in full, only: `new` candidates; recorded items whose visible indicators or name changed (`changed_items`); historical entries seen again; pending leads that gained an identifier or name (`enrich`).
+The classification counts and the IDs of new candidates are kept with the operation record in staging; the run accounting is generated from them. Returns counts per class (`new`, `item`, `historical`, `rejected`, `pending`, `dup_in_run`, and `conflict` when one occurs) and, in full, only: `new` candidates; recorded items whose visible indicators or name changed (`changed_items`); historical entries seen again; pending leads that gained an identifier or name (`enrich`); identity conflicts (`conflicts`, with the kinds of entry holding the ID and the profile's `collision_id`).
+
+**Identity.** Candidates match recorded entries by secondary key first, then by ID. With `identity.strict_secondary_key` in the profile, an entry and a candidate whose secondary keys are both known and differ never match, for any kind of entry and within the run: the candidate is a `conflict`. Without it, only rejected entries follow that rule (earlier behavior).
 
 ### apply
 
@@ -61,8 +63,8 @@ A JSON list of operations. The batch is checked against every invariant before a
 
 | Operation | Fields | Effect |
 |---|---|---|
-| `lead.add` | `name`, secondary key, `category`, `method`, `period`, optional `extra` | New pending lead, first seen on the execution date; refused if the ID or secondary key is already known. |
-| `lead.enrich` | `id`, `set` (secondary key and/or `name`) | Keeps first-seen date, method and period. |
+| `lead.add` | `name`, secondary key, `category`, `method`, `period`, optional `extra`, optional `id` | New pending lead, first seen on the execution date; refused if the ID or secondary key is already known. For an identity conflict (strict profiles) it takes the profile's collision ID (an explicit `id` must equal it), or is refused when the profile defines none. |
+| `lead.enrich` | `id`, `set` (secondary key and/or `name`) | Keeps first-seen date, method and period. With a strict profile a known secondary key is never replaced. |
 | `lead.accept` | `id`, `item` (framework fields, allowed relevance) | Item added; counts one verification. |
 | `lead.reject` | `id`, `relevance` (a rejection label), `reason` | Moved to `rejected_ids`; counts one verification. |
 | `lead.fail` | `id`, `reason` | Temporary failure: stays pending, not retried this run; counts one verification. |
@@ -75,7 +77,7 @@ A JSON list of operations. The batch is checked against every invariant before a
 | `item.deactivate` | `id`, `reason` | Moved to `historical_ids` with its identity fields. |
 | `item.reactivate` | `id`, `item` | Back to `items` on verified evidence. |
 
-Results for accepted and rejected leads include the lead's `discovery_period`, used to classify New versus First observation. Repairs (`--repair`, no run in progress, each with a `reason`): `source.set_coverage`, `baseline.set_window`, `item.add_alias`, `lead.resolve`.
+Results for accepted and rejected leads include the lead's `discovery_period`, used to classify New versus First observation. Repairs (`--repair`, no run in progress, each with a `reason`): `source.set_coverage`, `baseline.set_window`, `item.add_alias`, `lead.resolve`, and `rejected.reinstate` (`id`, `lead`: the lead's original fields, including `first_seen`, `category`, `method`, `period` and the stored secondary key), which moves a wrongly rejected entry back to `pending_leads` with its original first-seen date and category, so it is verified again in its deterministic queue position.
 
 ### queue, show, summary
 
@@ -89,7 +91,7 @@ Checks that the requested status matches the operation outcomes (`failed` for pa
 
 ## Invariants
 
-IDs follow the profile pattern and are unique across items, historical entries, rejected entries and pending leads, by ID and by secondary key; historical entries keep their identity fields; items are `active`; no item, historical entry or rejected entry disappears, and no lead disappears without an operation; the baseline window never changes once fixed; coverage only advances, only over contiguous periods whose every configured operation completed (or was reused from a valid checkpoint), and never beyond the last complete day (the execution date for recency-based methods); checkpoints name only completed operations; budgets are respected; only declared top-level keys exist.
+IDs follow the profile pattern and are unique across items, historical entries, rejected entries and pending leads, by ID and by secondary key (with a strict profile, an ID is never shared by two entries with different secondary keys); historical entries keep their identity fields; items are `active`; no item, historical entry or rejected entry disappears, and no lead disappears without an operation; the baseline window never changes once fixed; coverage only advances, only over contiguous periods whose every configured operation completed (or was reused from a valid checkpoint), and never beyond the last complete day (the execution date for recency-based methods); checkpoints name only completed operations; budgets are respected; only declared top-level keys exist.
 
 ## Known limitation
 

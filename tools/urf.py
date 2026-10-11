@@ -26,7 +26,7 @@ OPS_RE = re.compile(r"<!-- urf-ops\n(.*?)\n-->", re.S)
 ACC_BEGIN, ACC_END = "<!-- urf-accounting:begin -->", "<!-- urf-accounting:end -->"
 ACC_RE = re.compile(re.escape(ACC_BEGIN) + r".*?" + re.escape(ACC_END), re.S)
 OUTCOMES = ("lead.accept", "lead.reject", "lead.fail")
-REPAIR_OPS = {"source.set_coverage", "baseline.set_window", "item.add_alias", "lead.resolve"}
+REPAIR_OPS = {"source.set_coverage", "baseline.set_window", "item.add_alias", "lead.resolve", "rejected.reinstate"}
 
 
 class Fail(Exception):
@@ -135,6 +135,9 @@ class Ident:
     def __init__(self, profile):
         self.p = profile
         self.sk = profile.get("secondary_key")
+        # strict: two different known secondary keys are two different entries, never one
+        self.strict = bool(self.sk) and bool((profile.get("identity") or {}).get("strict_secondary_key"))
+        self.collision = profile["id"].get("collision")
 
     def derive(self, name):
         cfg = self.p["id"]
@@ -157,16 +160,39 @@ class Ident:
         return idx
 
     @staticmethod
-    def match(idx, kind, cid, sk):
+    def match(idx, kind, cid, sk, strict=False):
         """Secondary key first, then ID. A rejected entry matches by ID only when
-        either secondary key is unknown (framework rule); other kinds always do,
-        because one ID can never name two entries."""
+        either secondary key is unknown (framework rule); with a strict profile the
+        same holds for every kind. Otherwise other kinds always match by ID."""
         ids, sks = idx[kind]
         if sk is not None and sk in sks:
             return sks[sk]
-        if cid in ids and (kind != "rejected" or sk is None or ids[cid] is None):
+        if cid in ids and (sk is None or ids[cid] is None or (kind != "rejected" and not strict)):
             return cid
         return None
+
+    def find(self, idx, kind, cid, sk):
+        return Ident.match(idx, kind, cid, sk, self.strict)
+
+    def conflicts(self, idx, cid, sk):
+        """Entries holding this ID with a different known secondary key (strict profiles)."""
+        if not self.strict or sk is None:
+            return []
+        return [(k, cid) for k in ("item", "historical", "rejected", "pending")
+                if cid in idx[k][0] and idx[k][0][cid] is not None and idx[k][0][cid] != sk]
+
+    def collision_id(self, cid, sk):
+        if not self.collision:
+            return None
+        return self.collision.replace("{id}", cid).replace("{sk}", str(sk))
+
+    def own_id(self, key, name, sk, aliases=()):
+        """True when key is the derived ID of the name or an alias, or its collision form."""
+        for n in [name] + list(aliases):
+            d = self.derive(n)
+            if key == d or (sk is not None and key == self.collision_id(d, sk)):
+                return True
+        return False
 
 
 # ---------------------------------------------------------------- validation
@@ -246,10 +272,8 @@ def validate(st, P, root, base=None, ctx=None):
         if rep and rep != RUN_REPORT and not os.path.exists(os.path.join(root, rep)):
             E.append(f"item {k}: report missing {rep}")
         name = v.get("name")
-        if name and I.derive(name) != k:
-            aliases = [I.derive(a) for a in v.get("aliases", [])]
-            if k not in aliases:
-                W.append(f"item {k}: current name {name} differs from the ID and the old name is not in aliases")
+        if name and not I.own_id(k, name, v.get(I.sk) if I.sk else None, v.get("aliases", [])):
+            W.append(f"item {k}: current name {name} differs from the ID and the old name is not in aliases")
     keep = P.get("historical_keep", [])
     for k, v in st["historical_ids"].items():
         if not pat.match(k):
@@ -279,11 +303,17 @@ def validate(st, P, root, base=None, ctx=None):
     for l in st["pending_leads"]:
         lid, sk = I.lead_id(l), l.get(I.sk)
         for kind in ("item", "historical", "rejected"):
-            hit = Ident.match(idx, kind, lid, sk)
+            hit = I.find(idx, kind, lid, sk)
             if hit:
                 E.append(f"pending lead {lid} is also a {kind} entry ({hit})")
+            elif I.strict and lid in idx[kind][0]:
+                E.append(f"pending lead {lid} reuses the ID of a {kind} entry with another {I.sk}")
     for k in set(st["items"]) & set(st["historical_ids"]):
         E.append(f"{k} is both active and historical")
+    if I.strict:
+        for a, b in (("item", "rejected"), ("historical", "rejected")):
+            for k in set(idx[a][0]) & set(idx[b][0]):
+                E.append(f"{k} is both a {a} and a {b} entry")
     owners = {}
     for kind in ("item", "historical", "rejected"):
         for s, i in idx[kind][1].items():
@@ -299,7 +329,7 @@ def validate(st, P, root, base=None, ctx=None):
             if k not in st["items"] and k not in st["historical_ids"]:
                 E.append(f"item {k} removed")
         for k in base.get("rejected_ids", {}):
-            if k not in st.get("rejected_ids", {}):
+            if k not in st.get("rejected_ids", {}) and k not in ctx.get("reinstated", []):
                 E.append(f"rejected entry {k} removed")
         bw = base["baseline"].get("window", {})
         if bw.get("from") and bw != win and not ctx.get("repair"):
@@ -618,6 +648,7 @@ def cmd_record(pr, a):
     classes, out = classify(pr, w, rec.get("candidates", []))
     metrics = {k: v for k, v in rec.items() if k not in ("candidates", "method", "period", "op", "status")}
     new_ids = [c.get("id") or pr.I.derive(c["name"]) for c in out["new"]]
+    new_ids += [x["collision_id"] or x["seen_as"] for x in out["conflicts"]]
     w["ops"].append({"method": meth, "period": per, "op": op, "status": status, "reasons": reasons, **metrics,
                      "candidates": len(rec.get("candidates", [])), "classes": classes, "new_ids": new_ids,
                      "kind": "configured"})
@@ -646,22 +677,29 @@ def check(chk, rec):
 def classify(pr, w, cands):
     I, st = pr.I, w["state"]
     idx = I.index(st)
-    classes = {k: 0 for k in ("new", "item", "historical", "rejected", "pending", "dup_in_run")}
-    out = {"new": [], "changed_items": [], "historical": [], "enrich": []}
+    classes = {k: 0 for k in ("new", "item", "historical", "rejected", "pending", "dup_in_run", "conflict")}
+    out = {"new": [], "changed_items": [], "historical": [], "enrich": [], "conflicts": []}
     seen_ids, seen_sk = set(w["seen_ids"]), set(w["seen_sk"])
     for c in cands:
         cid = c.get("id") or I.derive(c["name"])
         sk = c.get(I.sk)
-        if cid in seen_ids or (sk is not None and sk in seen_sk):
+        dup = (sk is not None and sk in seen_sk) or ((sk is None or not I.strict) and cid in seen_ids)
+        if dup:  # strict profiles never merge two known secondary keys, even within a run
             classes["dup_in_run"] += 1
             continue
         seen_ids.add(cid)
         if sk is not None:
             seen_sk.add(sk)
-        kind = next((k for k in ("item", "historical", "rejected", "pending") if Ident.match(idx, k, cid, sk)), "new")
+        kind = next((k for k in ("item", "historical", "rejected", "pending") if I.find(idx, k, cid, sk)), "new")
+        hit = I.find(idx, kind, cid, sk) if kind != "new" else None
+        clash = I.conflicts(idx, cid, sk) if kind == "new" else []
+        if clash:
+            kind = "conflict"
         classes[kind] += 1
-        hit = Ident.match(idx, kind, cid, sk) if kind != "new" else None
-        if kind == "new":
+        if kind == "conflict":
+            out["conflicts"].append({"candidate": c, "seen_as": cid, "id_held_by": [k for k, _ in clash],
+                                     "collision_id": I.collision_id(cid, sk)})
+        elif kind == "new":
             out["new"].append(c)
         elif kind == "item":
             fp = st["items"][hit].get("fingerprint", {})
@@ -676,6 +714,8 @@ def classify(pr, w, cands):
             lead = next(l for l in st["pending_leads"] if I.lead_id(l) == hit)
             if (sk is not None and lead.get(I.sk) is None) or (hit != cid):
                 out["enrich"].append({"id": hit, "candidate": c})
+    if not classes["conflict"]:
+        del classes["conflict"]  # reported only when it occurs; earlier outputs keep their shape
     w["seen_ids"], w["seen_sk"] = sorted(seen_ids), sorted(seen_sk, key=str)
     return classes, out
 
@@ -700,12 +740,26 @@ def apply_change(pr, st, w, ch, run_date, plan, repair):
         meth, per = ch["method"], ch["period"]
         if per not in plan["methods"].get(meth, {}).get("periods", []):
             raise Fail(2, f"lead period {per} is not a planned period of {meth}")
-        lid = ch.get("id") or I.derive(ch["name"])
+        derived = I.derive(ch["name"])
+        lid = ch.get("id") or derived
         sk = ch.get(I.sk)
         idx = I.index(st)
         for kind in ("item", "historical", "rejected", "pending"):
-            if Ident.match(idx, kind, lid, sk):
+            if I.find(idx, kind, lid, sk) or I.find(idx, kind, derived, sk):
                 raise Fail(2, f"lead {lid} already exists as {kind}")
+        clash = I.conflicts(idx, derived, sk)
+        if clash:
+            cid = I.collision_id(derived, sk)
+            if cid is None:
+                raise Fail(2, f"identity conflict: {derived} is held by a {clash[0][0]} entry with another {I.sk}; "
+                              "the profile defines no collision ID, so the candidate cannot be added")
+            if ch.get("id") not in (None, cid):
+                raise Fail(2, f"identity conflict: use the collision ID {cid}")
+            if any(cid in idx[k][0] for k in idx):
+                raise Fail(2, f"collision ID {cid} is already in use")
+            lid = cid
+        elif ch.get("id") not in (None, derived):
+            raise Fail(2, f"lead ID {ch['id']} is not the derived ID {derived}")
         lead = {"id": lid, "name": ch["name"], "first_seen": run_date, "category": ch["category"],
                 "method": meth, "period": per}
         if I.sk:
@@ -719,6 +773,8 @@ def apply_change(pr, st, w, ch, run_date, plan, repair):
         for k, v in ch["set"].items():
             if k not in (I.sk, "name"):
                 raise Fail(2, "lead.enrich may set only the secondary key and name")
+            if I.strict and k == I.sk and lead.get(k) is not None and lead[k] != v:
+                raise Fail(2, f"lead {ch['id']} has {I.sk} {lead[k]}; another {I.sk} is another entry, not an enrichment")
             lead[k] = v
     elif op in ("lead.accept", "lead.reject", "lead.fail"):
         n, lead = find_lead(I, st, ch["id"])
@@ -803,6 +859,18 @@ def apply_change(pr, st, w, ch, run_date, plan, repair):
         item.update({"first_seen": item.get("first_seen", old.get("inactive_since")), "last_seen": run_date,
                      "last_verified": run_date, "status": "active", "report": RUN_REPORT})
         st["items"][ch["id"]] = item
+    elif op == "rejected.reinstate":
+        rej = st.get("rejected_ids", {})
+        if ch["id"] not in rej:
+            raise Fail(2, f"no rejected entry {ch['id']}")
+        new = dict(ch["lead"])
+        if I.sk and rej[ch["id"]] is not None and new.get(I.sk) != rej[ch["id"]]:
+            raise Fail(2, f"reinstated lead must keep {I.sk} {rej[ch['id']]}")
+        if not is_date(new.get("first_seen")):
+            raise Fail(2, "reinstated lead needs its original first_seen date")
+        del rej[ch["id"]]
+        new["id"] = ch["id"]
+        st["pending_leads"].append(new)
     elif op == "source.set_coverage":
         st["sources"][ch["method"]]["covered_through"] = ch["covered_through"]
         log["id"] = ch["method"]
@@ -826,7 +894,8 @@ def cmd_apply(pr, a):
         st, w = copy.deepcopy(base), {"attempted": [], "reverified": [], "counters": {}}
         logs = [apply_change(pr, st, w, ch, None, {"methods": {}}, True) for ch in changes]
         removed = [l["id"] for l in logs if l["op"] == "lead.resolve"]
-        E, W = validate(st, pr.P, pr.root, base, {"repair": True, "removed_leads": removed})
+        reinstated = [l["id"] for l in logs if l["op"] == "rejected.reinstate"]
+        E, W = validate(st, pr.P, pr.root, base, {"repair": True, "removed_leads": removed, "reinstated": reinstated})
         if E:
             raise Fail(2, "repair rejected", errors=E)
         atomic_write(pr.state_path, dump_state(st, detect_format(raw)))
@@ -965,19 +1034,20 @@ def accounting(m, w):
     added = {l["id"] for l in w["log"] if l["op"] == "lead.add"}
     dropped = {l["id"] for l in w["log"] if l["op"] == "screen.drop"}
     L += ["", "#### Discovery operations", "",
-          "| Method | Period | Operation | Status | Total | Read | Requests | Candidates | New leads | Dropped | New, not handled | Already pending | Recorded items | Historical | Previously rejected | Duplicates in run | Not already recorded |",
-          "|" + "---|" * 17]
+          "| Method | Period | Operation | Status | Total | Read | Requests | Candidates | New leads | Dropped | New, not handled | Already pending | Recorded items | Historical | Previously rejected | Duplicates in run | Not already recorded | Identity conflicts |",
+          "|" + "---|" * 18]
     for o in w["ops"]:
         cl = o.get("classes")
         head = [o["method"], o["period"] + (f" [{o['part']}]" if o.get("part") else ""), f"`{o['op']}`", o["status"]]
         if cl is None:
-            L.append("| " + " | ".join(head + ["—"] * 13) + " |")
+            L.append("| " + " | ".join(head + ["—"] * 14) + " |")
             continue
         new = set(o.get("new_ids", []))
         na, nd = len(new & added), len(new & dropped)
         nums = [o.get("total_count", "—"), o.get("items_read", "—"), o.get("requests", "—"), o.get("candidates", "—"),
                 na, nd, len(new) - na - nd, cl.get("pending", 0), cl.get("item", 0), cl.get("historical", 0),
-                cl.get("rejected", 0), cl.get("dup_in_run", 0), o.get("candidates", 0) - cl.get("dup_in_run", 0) - cl.get("item", 0)]
+                cl.get("rejected", 0), cl.get("dup_in_run", 0), o.get("candidates", 0) - cl.get("dup_in_run", 0) - cl.get("item", 0),
+                cl.get("conflict", 0)]
         L.append("| " + " | ".join(head + [str(x) for x in nums]) + " |")
     outs = [l for l in w["log"] if l["op"] in OUTCOMES]
     cols = [o for o in OUTCOMES]
