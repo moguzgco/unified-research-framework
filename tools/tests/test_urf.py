@@ -764,11 +764,11 @@ class AccountingTests(Base):
         self.assertEqual(out[0], 0, out)
         md = r.ok("summary")["markdown"]["accounting"]
         self.assertEqual(acc_rows(md, "Verification by slot"),
-                         [["normal", "0", "1", "1", "2"], ["reserve", "1", "0", "0", "1"],
-                          ["unqueued", "0", "0", "1", "1"], ["Total", "1", "1", "2", "4"]])
+                         [["normal", "0", "1", "1", "0", "2"], ["reserve", "1", "0", "0", "0", "1"],
+                          ["unqueued", "0", "0", "1", "0", "1"], ["Total", "1", "1", "2", "0", "4"]])
         self.assertEqual(acc_rows(md, "Verification by category"),
-                         [["1", "0", "1", "1", "2"], ["2", "1", "0", "0", "1"], ["3", "0", "0", "1", "1"],
-                          ["Total", "1", "1", "2", "4"]])
+                         [["1", "0", "1", "1", "0", "2"], ["2", "1", "0", "0", "0", "1"], ["3", "0", "0", "1", "0", "1"],
+                          ["Total", "1", "1", "2", "0", "4"]])
         self.assertIn("Budgets used: search 4 of 20, verify 4 of 60, reverify 0 of 10.", md)
 
     def test_finish_rejects_edited_accounting_and_accepts_unchanged(self):
@@ -938,6 +938,102 @@ class IdentityTests(Base):
         names = [l["name"] for l in q["reserve"] + q["normal"]]
         self.assertEqual(names, ["c1/a", "j/nuee"])  # original first_seen and category keep its queue position
         self.assertEqual(r.apply([dict(good, id="github.com/q/other")])[0], 2)  # repair only, never in a run
+
+
+# ------------------------------------------------------------------ deferred leads (stage 3)
+
+class DeferTests(Base):
+    EV = "page and clone need credentials; repo_id absent from the owner's public repositories"
+
+    def drepo(self, state, strict=False, days=30):
+        r = self.repo(state)
+        prof = strict_profile() if strict else json.load(open(PROFILE))
+        if days:
+            prof["defer"] = {"reconsider_days": days}
+        with open(os.path.join(r.root, "framework", "state-profile.json"), "w") as f:
+            json.dump(prof, f)
+        r.commit("profile")
+        return r
+
+    def finish_all(self, r, ids, date):
+        r.ok("finish", "--status", "complete", "--report", r.report(f"{date} Status: complete " + " ".join(ids)))
+        r.commit("run " + date)
+
+    def test_defer_in_run_skips_queue_until_due_then_keeps_priority(self):
+        leads = [lead("old/gone", 1, cat=2, first="2026-09-01"), lead("c1/a", 2, cat=1, first="2026-10-01"),
+                 lead("c1/b", 3, cat=1, first="2026-10-02")]
+        r = self.drepo(incremental_state(pending_leads=leads))
+        r.begin()
+        self.full_discovery(r)
+        q = r.ok("queue", "--n", "2")
+        self.assertEqual([l["name"] for l in q["reserve"]], ["old/gone"])
+        self.assertEqual(r.apply([{"op": "lead.defer", "id": "github.com/old/gone", "reason": "unavailable"}])[0], 2)
+        out = r.apply([{"op": "lead.defer", "id": "github.com/old/gone", "reason": "unavailable", "evidence": self.EV}])
+        self.assertEqual(out[0], 0, out)
+        self.assertEqual(out[1]["counters"]["verify"], 1)  # the establishing attempt uses one slot
+        md = r.ok("summary")["markdown"]
+        self.assertIn("Deferred this run (1): `github.com/old/gone` until 2026-11-09", md["unverified_leads"])
+        self.assertEqual(acc_rows(md["accounting"], "Verification by slot")[-1], ["Total", "0", "0", "0", "1", "1"])
+        self.finish_all(r, ["github.com/old/gone"], "2026-10-10")
+        d = next(l for l in r.state()["pending_leads"] if l["name"] == "old/gone")
+        self.assertEqual(d["deferred"], {"since": "2026-10-10", "until": "2026-11-09", "reason": "unavailable",
+                                         "evidence": self.EV, "count": 1})
+        self.assertEqual((d["first_seen"], d["category"]), ("2026-09-01", 2))
+        # before the reconsideration date: never queued, not even by the oldest-first reserve
+        r.begin(now="2026-10-11T10:00:00Z")
+        q = r.ok("queue", "--n", "4")
+        self.assertEqual([l["name"] for l in q["reserve"] + q["normal"]], ["c1/a", "c1/b"])
+        self.assertEqual(r.apply([{"op": "lead.fail", "id": "github.com/old/gone", "reason": "x"}])[0], 2)
+        self.assertIn("Still deferred (1): `github.com/old/gone` until 2026-11-09", r.ok("summary")["markdown"]["unverified_leads"])
+        r.ok("discard")
+        # due: back in its deterministic position (oldest first in the reserve)
+        r.begin(now="2026-11-09T10:00:00Z")
+        q = r.ok("queue", "--n", "2")
+        self.assertEqual([l["name"] for l in q["reserve"]], ["old/gone"])
+        r.apply([{"op": "lead.defer", "id": "github.com/old/gone", "reason": "still unavailable", "evidence": self.EV}])
+        d = next(l for l in r.ok("show", "--id", "github.com/old/gone").values())
+        self.assertEqual((d["deferred"]["count"], d["deferred"]["until"]), (2, "2026-12-09"))
+
+    def test_repair_deferral_uses_no_slot_and_needs_dates(self):
+        r = self.drepo(incremental_state(pending_leads=[lead("old/gone", 1)]))
+        base = {"op": "lead.defer", "id": "github.com/old/gone", "reason": "unavailable since 2026-10-03", "evidence": self.EV}
+        for bad in (base, dict(base, since="2026-10-11"), dict(base, since="2026-10-11", until="2026-10-11"),
+                    dict(base, since="2026-10-11", until="2026-11-10", evidence="")):
+            self.assertEqual(r.apply([bad], "--repair")[0], 2, bad)
+        out = r.apply([dict(base, since="2026-10-11", until="2026-11-10")], "--repair")
+        self.assertEqual(out[0], 0, out)
+        d = r.state()["pending_leads"][0]
+        self.assertEqual(d["deferred"]["count"], 1)
+        self.assertEqual(r.ok("validate", "--published")["valid"], True)
+
+    def test_discovery_with_same_identifier_makes_due(self):
+        dl = dict(lead("old/gone", 5), deferred={"since": "2026-10-01", "until": "2026-11-01", "reason": "unavailable",
+                                                 "evidence": self.EV, "count": 1})
+        r = self.drepo(incremental_state(pending_leads=[dl, lead("o/name", 6)]), strict=True)
+        r.begin()
+        out = r.record(op(NEW, PER, Q1, cands=[{"name": "old/gone", "repo_id": 77}]))
+        self.assertEqual(out["classes"]["conflict"], 1)  # same name, another repo: no reactivation
+        self.assertNotIn("due", out)
+        q = r.ok("queue", "--n", "5")
+        self.assertEqual([l["name"] for l in q["reserve"] + q["normal"]], ["o/name"])
+        out = r.record(op(NEW, PER, Q2, cands=[{"name": "renamed/gone", "repo_id": 5}]))
+        self.assertEqual(out["due"], ["github.com/old/gone"])
+        q = r.ok("queue", "--n", "5")
+        self.assertIn("github.com/old/gone", [l["id"] for l in q["reserve"] + q["normal"]])
+        self.assertIn("Made due by discovery this run (1)", r.ok("summary")["markdown"]["unverified_leads"])
+
+    def test_malformed_deferred_block_and_missing_interval(self):
+        bad = dict(lead("old/gone", 5), deferred={"since": "2026-10-01", "until": "2026-09-01", "reason": "",
+                                                  "evidence": [], "count": 0})
+        r = self.drepo(incremental_state(pending_leads=[bad]))
+        code, out = r.run("validate", "--published")
+        self.assertEqual(code, 2)
+        self.assertEqual(len([e for e in out["errors"] if "deferred" in e]), 4)
+        r2 = self.drepo(incremental_state(pending_leads=[lead("a/b", 1)]), days=None)
+        r2.begin()
+        ch = {"op": "lead.defer", "id": "github.com/a/b", "reason": "unavailable", "evidence": self.EV}
+        self.assertEqual(r2.apply([ch])[0], 2)  # no interval in the profile and none given
+        self.assertEqual(r2.apply([dict(ch, until="2026-10-20")])[0], 0)
 
 
 # ------------------------------------------------------------------ repair and generic profile

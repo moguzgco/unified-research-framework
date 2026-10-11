@@ -25,8 +25,10 @@ PRESERVED = os.path.join(".urf", "preserved")
 OPS_RE = re.compile(r"<!-- urf-ops\n(.*?)\n-->", re.S)
 ACC_BEGIN, ACC_END = "<!-- urf-accounting:begin -->", "<!-- urf-accounting:end -->"
 ACC_RE = re.compile(re.escape(ACC_BEGIN) + r".*?" + re.escape(ACC_END), re.S)
-OUTCOMES = ("lead.accept", "lead.reject", "lead.fail")
-REPAIR_OPS = {"source.set_coverage", "baseline.set_window", "item.add_alias", "lead.resolve", "rejected.reinstate"}
+OUTCOMES = ("lead.accept", "lead.reject", "lead.fail", "lead.defer")
+REPAIR_OPS = {"source.set_coverage", "baseline.set_window", "item.add_alias", "lead.resolve", "rejected.reinstate",
+              "lead.defer"}
+RUN_AND_REPAIR = {"lead.resolve", "lead.defer"}
 
 
 class Fail(Exception):
@@ -294,6 +296,8 @@ def validate(st, P, root, base=None, ctx=None):
             E.append(f"lead {l.get('name')}: missing {', '.join(miss)}")
             continue
         lid, sk = I.lead_id(l), l.get(I.sk)
+        if "deferred" in l:
+            E += [f"lead {lid}: {e}" for e in deferred_errors(l["deferred"])]
         if lid in seen_ids or (sk is not None and sk in seen_sk):
             E.append(f"duplicate pending lead {lid}")
         seen_ids.add(lid)
@@ -345,6 +349,26 @@ def validate(st, P, root, base=None, ctx=None):
             if used > ctx["budgets"].get(k, math.inf):
                 E.append(f"{k} budget exceeded: {used} > {ctx['budgets'][k]}")
     return E, W
+
+
+def deferred_errors(d):
+    if not isinstance(d, dict) or set(d) != {"since", "until", "reason", "evidence", "count"}:
+        return ["deferred must have since, until, reason, evidence, count"]
+    E = []
+    if not (is_date(d["since"]) and is_date(d["until"])) or D(d["until"]) < D(d["since"]):
+        E.append("deferred since/until invalid")
+    if not (isinstance(d["reason"], str) and d["reason"].strip()):
+        E.append("deferred reason missing")
+    if not d["evidence"] or not isinstance(d["evidence"], (str, list)):
+        E.append("deferred evidence missing")
+    if not isinstance(d["count"], int) or isinstance(d["count"], bool) or d["count"] < 1:
+        E.append("deferred count invalid")
+    return E
+
+
+def is_due(lead, run_date):
+    d = lead.get("deferred")
+    return not d or D(d["until"]) <= D(run_date)
 
 
 # ---------------------------------------------------------------- project context
@@ -645,7 +669,11 @@ def cmd_record(pr, a):
         if reasons:
             status = "incomplete"
     w["counters"]["search"] += requests
-    classes, out = classify(pr, w, rec.get("candidates", []))
+    classes, out = classify(pr, w, rec.get("candidates", []), m["run_date"])
+    for lid in out["due"]:
+        w["log"].append({"op": "lead.due", "id": lid, "reason": f"seen in discovery ({meth} {per} {op})"})
+    if not out["due"]:
+        del out["due"]
     metrics = {k: v for k, v in rec.items() if k not in ("candidates", "method", "period", "op", "status")}
     new_ids = [c.get("id") or pr.I.derive(c["name"]) for c in out["new"]]
     new_ids += [x["collision_id"] or x["seen_as"] for x in out["conflicts"]]
@@ -674,11 +702,11 @@ def check(chk, rec):
     return good, f"completion check failed: {field} {op} {want} (got {val!r}, expected {target!r})"
 
 
-def classify(pr, w, cands):
+def classify(pr, w, cands, run_date):
     I, st = pr.I, w["state"]
     idx = I.index(st)
     classes = {k: 0 for k in ("new", "item", "historical", "rejected", "pending", "dup_in_run", "conflict")}
-    out = {"new": [], "changed_items": [], "historical": [], "enrich": [], "conflicts": []}
+    out = {"new": [], "changed_items": [], "historical": [], "enrich": [], "conflicts": [], "due": []}
     seen_ids, seen_sk = set(w["seen_ids"]), set(w["seen_sk"])
     for c in cands:
         cid = c.get("id") or I.derive(c["name"])
@@ -712,6 +740,10 @@ def classify(pr, w, cands):
             out["historical"].append({"id": hit, "seen_as": cid, "candidate": c})
         elif kind == "pending":
             lead = next(l for l in st["pending_leads"] if I.lead_id(l) == hit)
+            d = lead.get("deferred")
+            if d and sk is not None and lead.get(I.sk) == sk and D(d["until"]) > D(run_date):
+                d["until"] = run_date  # seen again under its own identifier: due for reconsideration now
+                out["due"].append(hit)
             if (sk is not None and lead.get(I.sk) is None) or (hit != cid):
                 out["enrich"].append({"id": hit, "candidate": c})
     if not classes["conflict"]:
@@ -733,7 +765,7 @@ def apply_change(pr, st, w, ch, run_date, plan, repair):
     I, P, op = pr.I, pr.P, ch.get("op")
     if repair and op not in REPAIR_OPS:
         raise Fail(2, f"{op} is not a repair operation")
-    if not repair and op in REPAIR_OPS - {"lead.resolve"}:
+    if not repair and op in REPAIR_OPS - RUN_AND_REPAIR:
         raise Fail(2, f"{op} is only allowed with --repair")
     log = {"op": op, "id": ch.get("id"), "reason": ch.get("reason")}
     if op == "lead.add":
@@ -778,6 +810,8 @@ def apply_change(pr, st, w, ch, run_date, plan, repair):
             lead[k] = v
     elif op in ("lead.accept", "lead.reject", "lead.fail"):
         n, lead = find_lead(I, st, ch["id"])
+        if not is_due(lead, run_date):
+            raise Fail(2, f"lead {ch['id']} is deferred until {lead['deferred']['until']}")
         if ch["id"] in w["attempted"]:
             raise Fail(2, f"lead {ch['id']} was already attempted in this run")
         w["attempted"].append(ch["id"])
@@ -806,6 +840,36 @@ def apply_change(pr, st, w, ch, run_date, plan, repair):
                 if P.get("rejected_ids"):
                     st.setdefault("rejected_ids", {})[ch["id"]] = ch.get(I.sk, lead.get(I.sk)) if I.sk else None
         log["discovery_period"] = lead["period"]
+    elif op == "lead.defer":
+        n, lead = find_lead(I, st, ch["id"])
+        if not ch.get("reason") or not ch.get("evidence"):
+            raise Fail(2, "lead.defer needs a reason and evidence")
+        if repair:
+            since, until = ch.get("since"), ch.get("until")
+            if not (is_date(since) and is_date(until)) or D(until) <= D(since):
+                raise Fail(2, "a repair deferral needs explicit since and until dates, until after since")
+        else:
+            if ch["id"] in w["attempted"]:
+                raise Fail(2, f"lead {ch['id']} was already attempted in this run")
+            if not is_due(lead, run_date):
+                raise Fail(2, f"lead {ch['id']} is deferred until {lead['deferred']['until']}")
+            w["attempted"].append(ch["id"])
+            w["counters"]["verify"] += 1
+            log.update(category=lead.get("category"), first_seen=lead.get("first_seen"),
+                       slot=w.get("slots", {}).get(ch["id"], "unqueued"))
+            since = run_date
+            days = (P.get("defer") or {}).get("reconsider_days")
+            until = ch.get("until")
+            if until is None and days:
+                until = (D(run_date) + dt.timedelta(days=days)).isoformat()
+            if until is None:
+                raise Fail(2, "the profile defines no defer.reconsider_days; give until")
+            if D(until) <= D(run_date):
+                raise Fail(2, "until must be after the execution date")
+        prev = lead.get("deferred") or {}
+        lead["deferred"] = {"since": since, "until": until, "reason": ch["reason"], "evidence": ch["evidence"],
+                            "count": prev.get("count", 0) + 1}
+        log.update(until=until, count=lead["deferred"]["count"])
     elif op in ("lead.resolve", "lead.drop"):
         if not ch.get("reason"):
             raise Fail(2, f"{op} needs a reason")
@@ -935,7 +999,7 @@ def cmd_queue(pr, a):
     st, I, q = w["state"], pr.I, pr.P["queue"]
     left = m["budgets"]["verify"] - w["counters"]["verify"]
     n = max(0, min(a.n, left))
-    pool = [l for l in st["pending_leads"] if I.lead_id(l) not in w["attempted"]]
+    pool = [l for l in st["pending_leads"] if I.lead_id(l) not in w["attempted"] and is_due(l, m["run_date"])]
     rq = q.get("reserve")
     r = min(n, math.ceil(rq["fraction"] * n)) if rq and rq.get("round") == "up" else (min(n, int(rq["fraction"] * n)) if rq else 0)
     reserve = sorted(pool, key=sort_key(rq["order"], I))[:r] if rq else []
@@ -1051,7 +1115,7 @@ def accounting(m, w):
         L.append("| " + " | ".join(head + [str(x) for x in nums]) + " |")
     outs = [l for l in w["log"] if l["op"] in OUTCOMES]
     cols = [o for o in OUTCOMES]
-    names = {"lead.accept": "Accepted", "lead.reject": "Rejected", "lead.fail": "Temporary failures"}
+    names = {"lead.accept": "Accepted", "lead.reject": "Rejected", "lead.fail": "Temporary failures", "lead.defer": "Deferred"}
 
     def table(title, key):
         rows = {}
@@ -1084,6 +1148,9 @@ def cmd_summary(pr, a):
     leads = st["pending_leads"]
     added = [l for l in leads if l["first_seen"] == m["run_date"]]
     failed = by.get("lead.fail", [])
+    deferred_now = {l["id"] for l in by.get("lead.defer", [])}
+    waiting = sorted((l for l in leads if not is_due(l, m["run_date"]) and pr.I.lead_id(l) not in deferred_now),
+                     key=lambda l: (l["deferred"]["until"], pr.I.lead_id(l)))
     backlog = {}
     for l in leads:
         backlog.setdefault(l.get("category"), {}).setdefault(l["first_seen"], 0)
@@ -1100,6 +1167,9 @@ def cmd_summary(pr, a):
                 f"All pending leads remain in `state.json`.", "",
                 f"Added this run ({len(added)}): " + (", ".join(f"`{pr.I.lead_id(l)}` (cat. {l.get('category')})" for l in added) or "None"), "",
                 f"Temporary failures this run ({len(failed)}): " + ("; ".join(f"`{l['id']}` — {l.get('reason')}" for l in failed) or "None"), "",
+                f"Deferred this run ({len(by.get('lead.defer', []))}): " + ("; ".join(f"`{l['id']}` until {l['until']} — {l.get('reason')}" for l in by.get("lead.defer", [])) or "None"), "",
+                f"Made due by discovery this run ({len(by.get('lead.due', []))}): " + (", ".join(f"`{l['id']}`" for l in by.get("lead.due", [])) or "None"), "",
+                f"Still deferred ({len(waiting)}): " + (", ".join(f"`{pr.I.lead_id(l)}` until {l['deferred']['until']}" for l in waiting) or "None"), "",
                 "| Category | First seen | Leads |", "|---|---|---|"]
     md_leads += [f"| {c} | {fs} | {n} |" for c in sorted(backlog, key=lambda x: (x is None, x))
                  for fs, n in sorted(backlog[c].items())]

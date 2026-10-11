@@ -25,5 +25,6 @@
     "order": ["category", "first_seen", "name_ci"],
     "reserve": { "fraction": 0.25, "round": "up", "order": ["first_seen", "category", "name_ci"] }
   },
-  "reverify_interval_days": 30
+  "reverify_interval_days": 30,
+  "defer": { "_reconsider_days": "Days a deferred lead waits before it is queued again; omit to require an explicit until.", "reconsider_days": 30 }
 }
