@@ -18,7 +18,9 @@
     "<coverage key>": {
       "baseline": "month | window | recency",
       "_completion": "Checks a recorded operation must pass to count as complete: [field, '==' or '>=', value | '$field' | {'min': ['$a', '$b']}]. Reaching a depth limit is never completion on its own.",
-      "completion": [["incomplete_results", "==", false]]
+      "completion": [["incomplete_results", "==", false]],
+      "_exhaustive": "Optional: checks that an operation read its full result space, e.g. [['items_read', '>=', '$total_count']]. A complete operation that fails them opens a discovery gap. Omit to never record gaps.",
+      "exhaustive": []
     }
   },
   "queue": {

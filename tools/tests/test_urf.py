@@ -1036,6 +1036,188 @@ class DeferTests(Base):
         self.assertEqual(r2.apply([dict(ch, until="2026-10-20")])[0], 0)
 
 
+# ------------------------------------------------------------------ discovery gaps (stage 4)
+
+EXH = [["items_read", ">=", "$total_count"]]
+
+
+class GapTests(Base):
+    def grepo(self, state=None):
+        r = self.repo(state or incremental_state())
+        with open(PROFILE) as f:
+            prof = json.load(f)
+        for meth in (NEW, EST):
+            prof["methods"][meth]["exhaustive"] = EXH
+        with open(os.path.join(r.root, "framework", "state-profile.json"), "w") as f:
+            json.dump(prof, f)
+        r.commit("profile with exhaustiveness")
+        return r
+
+    def bounded_run(self, r):
+        r.begin()
+        out = r.record(op(NEW, PER, Q1, total_count=47, items_read=30))
+        self.assertEqual(out["gap_opened"], {"method": NEW, "period": PER, "op": Q1})
+        self.assertNotIn("gap_opened", r.record(op(NEW, PER, Q2, total_count=12, items_read=12)))
+        r.record(op(EST, PER, Q1))
+        r.record(op(EST, PER, Q2))
+        r.ok("finish", "--status", "complete", "--report", r.report("2026-10-10 Status: complete"))
+        r.commit("run 2026-10-10")
+
+    def gsplit(self, r, part, into, rule="per day"):
+        return r.apply([{"op": "gap.split", "method": NEW, "period": PER, "query": Q1, "part": part, "into": into, "rule": rule}])
+
+    def part(self, label, total, read, cands=(), **kw):
+        rec = op(NEW, PER, Q1, total_count=total, items_read=read, cands=cands, **kw)
+        rec["part"] = label
+        return rec
+
+    def test_bounded_operation_opens_gap_and_coverage_is_unchanged(self):
+        r = self.grepo()
+        self.bounded_run(r)
+        st = r.state()
+        self.assertEqual(st["sources"][NEW]["covered_through"], "2026-10-09")  # configured operations complete
+        self.assertEqual(st["sources"][NEW]["gaps"], [{"period": PER, "op": Q1, "opened": "2026-10-10",
+                                                       "report": "reports/daily/2026-10-10.md",
+                                                       "evidence": {"total_count": 47, "items_read": 30},
+                                                       "parts": {"*": {"status": "split_required"}}}])
+        self.assertNotIn("gaps", st["sources"][EST])
+        with open(os.path.join(r.root, "reports/daily/2026-10-10.md")) as f:
+            self.assertIn(f"| {NEW} | {PER} | `{Q1}` | 2026-10-10 | opened this run | 0 of 1 | `*` |", f.read())
+
+    def test_gap_resumes_across_runs_and_closes_only_when_every_part_is_closed(self):
+        r = self.grepo()
+        self.bounded_run(r)
+        out = r.begin(now="2026-10-11T10:00:00Z")
+        self.assertEqual(out["plan"]["gaps"], [{"method": NEW, "period": PER, "op": Q1, "opened": "2026-10-10",
+                                                "open_parts": ["*"], "split_required": ["*"]}])
+        self.assertEqual(self.gsplit(r, "*", ["d1", "d2"])[0], 0)
+        out = r.record(self.part("d1", 20, 20))
+        self.assertEqual((out["part_status"], out["gap_closed"]), ("closed", False))
+        per11 = "2026-10-10..2026-10-10"
+        for m in (NEW, EST):
+            for q in (Q1, Q2):
+                r.record(op(m, per11, q))
+        r.ok("finish", "--status", "complete", "--report", r.report("2026-10-11 Status: complete"))
+        r.commit("run 2026-10-11")
+        g = r.state()["sources"][NEW]["gaps"][0]
+        self.assertEqual({k: v["status"] for k, v in g["parts"].items()}, {"*": "split", "d1": "closed", "d2": "open"})
+        self.assertEqual(r.state()["sources"][NEW]["covered_through"], "2026-10-10")
+        with open(os.path.join(r.root, "reports/daily/2026-10-11.md")) as f:
+            self.assertIn("advanced this run | 1 of 2 | `d2` |", f.read())
+        # third run: a part that is still too large is split again; the gap closes with its last leaf
+        out = r.begin(now="2026-10-12T10:00:00Z")
+        self.assertEqual(out["plan"]["gaps"][0]["open_parts"], ["d2"])
+        self.assertEqual(r.record(self.part("d2", 40, 30))["part_status"], "split_required")
+        self.assertEqual(self.gsplit(r, "d2", ["d2a", "d2b"], rule="halve the day")[0], 0)
+        self.assertFalse(r.record(self.part("d2a", 25, 25))["gap_closed"])
+        self.assertTrue(r.record(self.part("d2b", 15, 15))["gap_closed"])
+        md = r.ok("summary")["markdown"]["accounting"]
+        self.assertIn("closed this run | 3 of 3 | none |", md)  # leaves d1, d2a, d2b
+        self.assertIn("Search requests by operation kind: gap 3.", md)
+        per12 = "2026-10-11..2026-10-11"
+        for m in (NEW, EST):
+            for q in (Q1, Q2):
+                r.record(op(m, per12, q))
+        r.ok("finish", "--status", "complete", "--report", r.report("2026-10-12 Status: complete"))
+        st = r.state()
+        self.assertNotIn("gaps", st["sources"][NEW])
+        self.assertEqual(st["sources"][NEW]["covered_through"], "2026-10-11")
+
+    def test_part_rules(self):
+        r = self.grepo()
+        self.bounded_run(r)
+        r.begin(now="2026-10-11T10:00:00Z")
+        code, _ = r.run("record", "--file", r.jfile("op", self.part("*", 47, 30)))
+        self.assertEqual(code, 2)  # a part that needs splitting is not recorded again
+        code, _ = r.run("record", "--file", r.jfile("op", self.part("d1", 10, 10)))
+        self.assertEqual(code, 2)  # undeclared part
+        for into, rule in ((["only"], "x"), (["*", "x"], "x"), (["a", "a"], "x"), (["a", "b"], "")):
+            self.assertEqual(self.gsplit(r, "*", into, rule=rule)[0], 2, into)
+        self.assertEqual(r.apply([{"op": "gap.split", "method": NEW, "period": PER, "query": Q2, "part": "*",
+                                   "into": ["a", "b"], "rule": "x"}])[0], 2)  # no gap for that operation
+        self.assertEqual(self.gsplit(r, "*", ["a", "b"])[0], 0)
+        self.assertEqual(self.gsplit(r, "*", ["c", "d"])[0], 2)  # already split
+        r.record(self.part("a", 5, 5))
+        code, _ = r.run("record", "--file", r.jfile("op", self.part("a", 5, 5)))
+        self.assertEqual(code, 2)  # a closed part is never recorded again
+        rec = self.part("b", 50, 20, status="complete")
+        self.assertEqual(r.record(rec)["status"], "incomplete")  # completion checks still apply: stays open
+        self.assertEqual(r.ok("show", "--id", "x")["x"]["kind"], "unknown")
+        g = json.load(open(os.path.join(r.root, ".urf", "run", "work.json")))["state"]["sources"][NEW]["gaps"][0]
+        self.assertEqual(g["parts"]["b"]["status"], "open")
+
+    def test_leads_from_a_gap_part_keep_its_period(self):
+        r = self.grepo()
+        self.bounded_run(r)
+        r.begin(now="2026-10-11T10:00:00Z")
+        add = {"op": "lead.add", "name": "late/one", "repo_id": 501, "category": 2, "method": NEW, "period": PER}
+        self.assertEqual(r.apply([add])[0], 2)  # no part of that gap examined yet in this run
+        self.gsplit(r, "*", ["d1", "d2"])
+        out = r.record(self.part("d1", 3, 3, cands=[{"name": "late/one", "repo_id": 501}]))
+        self.assertEqual(out["classes"]["new"], 1)
+        self.assertEqual(r.apply([add])[0], 0)
+        lead_ = r.ok("show", "--id", "github.com/late/one")["github.com/late/one"]
+        self.assertEqual((lead_["first_seen"], lead_["period"]), ("2026-10-11", PER))
+        rows = acc_rows(r.ok("summary")["markdown"]["accounting"], "Discovery operations")
+        self.assertEqual(rows[0][1], PER + " [d1]")
+        self.assertEqual(rows[0][8], "1")  # new lead attributed to the gap part
+
+    def test_budget_exhaustion_leaves_gap_open_without_blocking_finish(self):
+        r = self.grepo()
+        self.bounded_run(r)
+        r.begin(now="2026-10-11T10:00:00Z", c=cfg(budgets={"search": 5, "verify": 60, "reverify": 10}))
+        per11 = "2026-10-10..2026-10-10"
+        for m in (NEW, EST):
+            for q in (Q1, Q2):
+                r.record(op(m, per11, q))
+        self.gsplit(r, "*", ["d1", "d2"])
+        r.record(self.part("d1", 5, 5))
+        code, out = r.run("record", "--file", r.jfile("op", self.part("d2", 5, 5)))
+        self.assertEqual(code, 2)
+        self.assertIn("search budget", out["error"])
+        self.assertEqual(r.ok("summary")["derived_status"], "complete")
+        r.ok("finish", "--status", "complete", "--report", r.report("2026-10-11 Status: complete"))
+        g = r.state()["sources"][NEW]["gaps"][0]
+        self.assertEqual(g["parts"]["d2"]["status"], "open")
+
+    def test_add_gap_repair_discard_and_validation(self):
+        r = self.grepo()
+        good = {"op": "source.add_gap", "method": NEW, "period": "2026-10-01..2026-10-02", "query": Q1,
+                "opened": "2026-10-11", "report": "reports/daily/2026-09-01.md", "reason": "review found a bounded search",
+                "evidence": {"total_count": 56, "items_read": 30}}
+        for bad in ({k: v for k, v in good.items() if k != "evidence"}, dict(good, period="2026-10-08..2026-10-09"),
+                    dict(good, report="reports/daily/none.md"), {k: v for k, v in good.items() if k != "reason"}):
+            self.assertEqual(r.apply([bad], "--repair")[0], 2, bad)
+        out = r.apply([good], "--repair")
+        self.assertEqual(out[0], 0, out)
+        r.commit("repair")
+        self.assertEqual(r.apply([good], "--repair")[0], 2)  # duplicate
+        st = r.state()
+        self.assertEqual(st["sources"][NEW]["covered_through"], "2026-10-08")  # coverage untouched
+        self.assertEqual(st["sources"][NEW]["gaps"][0]["parts"], {"*": {"status": "split_required"}})
+        self.assertEqual(r.ok("validate", "--published")["valid"], True)
+        before = r.raw_state()
+        r.begin()
+        self.assertEqual(r.apply([good])[0], 2)  # repair only
+        r.apply([{"op": "gap.split", "method": NEW, "period": "2026-10-01..2026-10-02", "query": Q1, "part": "*",
+                  "into": ["a", "b"], "rule": "per day"}])
+        r.ok("discard")
+        self.assertEqual(r.raw_state(), before)  # discarded staging leaves published gaps untouched
+        broken = r.state()
+        broken["sources"][NEW]["gaps"][0]["parts"]["orphan"] = {"status": "open", "parent": "nowhere"}
+        r.write("state.json", json.dumps(broken))
+        code, out = r.run("validate", "--published")
+        self.assertEqual(code, 2)
+        self.assertIn("no valid parent", " ".join(out["errors"]))
+
+    def test_profile_without_exhaustiveness_never_opens_gaps(self):
+        r = self.repo()
+        r.begin()
+        self.assertNotIn("gap_opened", r.record(op(NEW, PER, Q1, total_count=500, items_read=30)))
+        md = r.ok("summary")["markdown"]["accounting"]
+        self.assertIn("#### Discovery gaps\n\nNone.", md)
+
+
 # ------------------------------------------------------------------ repair and generic profile
 
 class RepairTests(Base):
