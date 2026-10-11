@@ -449,10 +449,9 @@ def cmd_begin(pr, a):
     cfg = read_json(a.config)
     if cfg.get("contract") != "continuous":
         raise Fail(3, "the utility serves Contract: continuous only")
-    if cfg.get("push_available") is not True:
-        raise Fail(3, "push access unavailable: stop before research; persist no report (common contract section 5)")
     now = dt.datetime.fromisoformat(a.now.replace("Z", "+00:00")).astimezone(dt.timezone.utc)
     run_date = now.date()
+    mode = publication_mode(cfg, run_date)
     lcd = run_date - dt.timedelta(days=1)
     note = preflight(pr, cfg, run_date)
     if note.get("resume"):
@@ -472,7 +471,7 @@ def cmd_begin(pr, a):
     manifest = {"run_date": run_date.isoformat(), "lcd": lcd.isoformat(), "started_at": now.isoformat(),
                 "phase": "staged", "base_sha": sha(raw.encode("utf-8")), "config_sha": pr.config_sha(cfg),
                 "format": detect_format(raw), "budgets": budgets, "reverify_interval_days": interval,
-                "plan": plan, "targets": None, "status": None}
+                "plan": plan, "targets": None, "status": None, "publication_mode": mode}
     work = {"state": st, "base": st, "ops": [], "seen_ids": [], "seen_sk": [], "log": [], "attempted": [],
             "reverified": [], "counters": {"search": 0, "verify": 0, "reverify": 0}}
     os.makedirs(pr.stage, exist_ok=True)
@@ -483,6 +482,24 @@ def cmd_begin(pr, a):
         warnings.append(f"search budget {budgets['search']} is below one pass of {nops} configured operations; coverage cannot complete in this run")
     return {"resumed": False, "run_date": manifest["run_date"], "lcd": manifest["lcd"], "plan": plan,
             "budgets": budgets, "warnings": warnings, "counts": counts(st, pr.P, run_date, interval)}
+
+
+def publication_mode(cfg, run_date):
+    """automatic: push access is required. manual-supervised: one supervised run the
+    maintainer authorizes by its execution date; the maintainer pushes."""
+    push, mode = cfg.get("push_available"), cfg.get("publication_mode", "automatic")
+    if not isinstance(push, bool):
+        raise Fail(3, "push_available must be true or false")
+    if mode == "automatic":
+        if not push:
+            raise Fail(3, "push access unavailable: stop before research; persist no report (common contract section 5)")
+    elif mode == "manual-supervised":
+        auth = cfg.get("maintainer_authorization")
+        if not isinstance(auth, str) or run_date.isoformat() not in auth:
+            raise Fail(3, "manual-supervised publication needs maintainer_authorization naming this run's execution date")
+    else:
+        raise Fail(3, f"unsupported publication_mode {mode!r}")
+    return mode
 
 
 def counts(st, P, run_date, interval):
@@ -965,6 +982,8 @@ def cmd_finish(pr, a):
             problems.append(f"report does not state Status: {a.status}")
         if a.fatal and a.fatal not in report:
             problems.append("report does not state the fatal error reason")
+        if m.get("publication_mode") == "manual-supervised" and "pending maintainer push" not in report.lower():
+            problems.append("manual-supervised run: report must state that publication is pending maintainer push")
         if a.status != "failed":
             low = report.lower()
             problems += [f"report does not list {i}" for i in acted_ids(w) if i.lower() not in low]
@@ -995,8 +1014,14 @@ def cmd_finish(pr, a):
     m["phase"] = "published"
     pr.save(manifest=m)
     t = m["plan"]["type"]
-    return {"published": sorted(m["targets"]), "status": m["status"],
-            "commit": f"git add state.json {rel} && git commit -m \"research: {m['run_date']} {t} {m['status']}\""}
+    out = {"published": sorted(m["targets"]), "status": m["status"],
+           "commit": f"git add state.json {rel} && git commit -m \"research: {m['run_date']} {t} {m['status']}\""}
+    if m.get("publication_mode") == "manual-supervised":
+        out["written_locally"] = out.pop("published")
+        out["publication_mode"] = "manual-supervised"
+        out["remote_publication"] = ("pending maintainer push: files are written locally; after the local commit "
+                                     "the run is not remotely published until the maintainer pushes; send no email")
+    return out
 
 
 def cmd_validate(pr, a):

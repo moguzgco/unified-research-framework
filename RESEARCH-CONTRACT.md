@@ -60,7 +60,7 @@ Compute at the start of each run and list the result in the report.
 
 Execution contracts sequence these steps and may add their own.
 
-- **Record** the execution date, available tools and permissions. If Git push access is unavailable, stop before research: persist no report and change no research state; the error appears only in the run output.
+- **Record** the execution date, available tools and permissions. If Git push access is unavailable, stop before research: persist no report and change no research state; the error appears only in the run output. Exception: a supervised run that the maintainer explicitly authorizes for its execution date may use **manual-supervised publication**. It runs without push access, commits locally, states in its report that publication is pending the maintainer's push, never claims remote publication and sends no email. Unattended runs never use it.
 - **Discover** candidates within effective sources and budget.
 - **Screen** candidates against scope and relevance, and against anything else the execution contract adds.
 - **Verify** relevant candidates against original sources.
